@@ -61,7 +61,7 @@ from sqlalchemy.orm import declarative_base, relationship, sessionmaker, Session
 SECRET_KEY = os.environ.get("SECRET_KEY", secrets.token_hex(32))
 ALGORITHM = "HS256"
 ACCESS_TOKEN_EXPIRE_DAYS = 30
-DATABASE_URL = os.environ.get("DATABASE_URL", "sqlite:///./growth_tracker.db")
+DATABASE_URL = os.environ.get("DATABASE_URL", "postgresql://neondb_owner:npg_plvPhjQ4GFE8@ep-polished-sound-aypwc5kt-pooler.c-5.us-east-2.aws.neon.tech/neondb?sslmode=require&channel_binding=require")
 ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY")
 
 CURRENCIES = {"UGX", "USD", "KES", "EUR", "GBP"}
