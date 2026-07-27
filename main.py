@@ -45,7 +45,8 @@ import hashlib
 import secrets
 import json
 import calendar
-from datetime import datetime, date, timedelta, timezone
+import datetime
+from datetime import datetime as dt, date, timedelta, timezone
 from typing import Optional, List
 
 import jwt
@@ -99,7 +100,7 @@ Base = declarative_base()
 
 
 def utcnow():
-    return datetime.now(timezone.utc)
+    return dt.now(timezone.utc)
 
 
 # ----------------------------------------------------------------------------
@@ -444,7 +445,7 @@ class TransactionIn(BaseModel):
     amount: float
     category: str = "Other"
     description: str = ""
-    date: Optional[date] = None
+    date: Optional[datetime.date] = None
 
     @field_validator("type")
     @classmethod
@@ -459,7 +460,7 @@ class TransactionUpdateIn(BaseModel):
     amount: Optional[float] = None
     category: Optional[str] = None
     description: Optional[str] = None
-    date: Optional[date] = None
+    date: Optional[datetime.date] = None
 
 
 class TransactionOut(BaseModel):
@@ -479,7 +480,7 @@ class SavingsIn(BaseModel):
     profit_amount: float
     percentage: float
     note: str = ""
-    date: Optional[date] = None
+    date: Optional[datetime.date] = None
 
 
 class SavingsOut(BaseModel):
@@ -600,7 +601,7 @@ class NotificationOut(BaseModel):
     message: str
     kind: str
     is_read: bool
-    created_at: datetime
+    created_at: dt
 
     class Config:
         from_attributes = True
@@ -631,7 +632,7 @@ class MissionUpdateIn(BaseModel):
 
 
 class JournalIn(BaseModel):
-    date: Optional[date] = None
+    date: Optional[datetime.date] = None
     accomplished: str = ""
     challenges: str = ""
     learned: str = ""
