@@ -32,14 +32,25 @@ Run locally:
 Environment variables:
     SECRET_KEY          — JWT signing secret
     DATABASE_URL         — defaults to sqlite:///./growth_tracker.db
-    GEMINI_API_KEY        — optional. If set, the AI Advisor, the Daily
-                           Recommendations engine, the Todo feedback engine,
-                           and the AI Chat assistant call Google's Gemini API
-                           (google-generativeai) for richer, personalized
-                           output. If unset, a built-in rule-based advisor
-                           is used instead (no external calls at all).
-    ANTHROPIC_API_KEY    — optional secondary provider for /ai/advice and
-                           /ai/chat; only used if GEMINI_API_KEY is not set.
+    GEMINI_API_KEY        — REQUIRED for all AI features. Gemini is the sole
+                           AI provider in this backend: the AI Advisor, the
+                           Daily Recommendations engine, the Todo feedback
+                           engine, and the AI Chat assistant all call
+                           Google's Gemini API via the `google-genai` SDK.
+                           If unset (or a call fails), a built-in rule-based
+                           fallback is used instead so the app keeps working,
+                           but no AI provider is contacted in that case.
+    GEMINI_MODEL          — optional, defaults to "gemini-3.5-flash" (the
+                           current generally-available Gemini Flash model).
+                           Override if you want to pin a different model,
+                           e.g. "gemini-3.6-flash".
+
+Dependency note: this file uses the current unified `google-genai` SDK
+(`pip install google-genai`), NOT the older/deprecated `google-generativeai`
+package. Also note that Gemini model names are periodically retired by
+Google (e.g. gemini-2.0-flash was shut down on 2026-06-01) — if AI calls
+stop working, check GET /ai/status first and update GEMINI_MODEL if Google
+has retired the configured model.
 """
 
 import os
@@ -47,6 +58,7 @@ import hmac
 import hashlib
 import secrets
 import json
+import logging
 import calendar
 import datetime
 from datetime import datetime as dt, date, timedelta, timezone
@@ -64,6 +76,15 @@ from sqlalchemy import (
 from sqlalchemy.orm import declarative_base, relationship, sessionmaker, Session
 
 # ----------------------------------------------------------------------------
+# Logging — AI call failures are logged loudly instead of being swallowed,
+# so a misconfigured/retired model or bad API key is visible in the logs
+# instead of silently falling back with no trace.
+# ----------------------------------------------------------------------------
+
+logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(name)s: %(message)s")
+logger = logging.getLogger("growth_tracker.ai")
+
+# ----------------------------------------------------------------------------
 # Config
 # ----------------------------------------------------------------------------
 
@@ -75,7 +96,7 @@ DATABASE_URL = os.environ.get(
     "postgresql://neondb_owner:npg_plvPhjQ4GFE8@ep-polished-sound-aypwc5kt-pooler.c-5.us-east-2.aws.neon.tech/neondb?sslmode=require&channel_binding=require",
 )
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
-ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY")
+GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-3.5-flash")
 
 CURRENCIES = {"UGX", "USD", "KES", "EUR", "GBP"}
 
@@ -820,7 +841,7 @@ class ChatHistoryOut(BaseModel):
 # App
 # ----------------------------------------------------------------------------
 
-app = FastAPI(title="Business Growth Tracker AI API", version="2.1.0")
+app = FastAPI(title="Business Growth Tracker AI API", version="2.2.0")
 
 app.add_middleware(
     CORSMiddleware,
@@ -1467,17 +1488,19 @@ def list_todos(
 
 def _generate_todo_feedback(db: Session, user: User, t: Todo) -> str:
     """Short, immediate AI-style feedback on a single newly-created task,
-    using Gemini if available, else a rule-based heuristic."""
+    using Gemini (with full account context) if available, else a
+    rule-based heuristic."""
     if GEMINI_API_KEY:
-        snapshot = _build_full_system_snapshot(db, user, light=True)
+        snapshot = _build_full_system_snapshot(db, user, light=False)
         prompt = (
             "You are a business task coach. A user just added this task to their todo list: "
             + json.dumps({"title": t.title, "notes": t.notes, "priority": t.priority, "due_date": t.due_date.isoformat() if t.due_date else None})
-            + ". Here is brief context on their business situation: " + json.dumps(snapshot)
+            + ". Here is the user's full current business/account data for context: "
+            + json.dumps(snapshot, default=str)
             + ". Respond with ONE short sentence (max 25 words) of direct, useful feedback or "
               "advice on this specific task — no preamble, no markdown, plain text only."
         )
-        text = _call_gemini(prompt)
+        text = _call_gemini(prompt, context="todo_feedback")
         if text:
             return text.strip().strip('"')
     # Rule-based fallback
@@ -1562,22 +1585,22 @@ def ai_todo_feedback(user: User = Depends(get_current_user), db: Session = Depen
         return {"feedback": ["You have no open tasks — add today's tasks so the AI can help you plan and score the day."]}
 
     if GEMINI_API_KEY:
-        snapshot = _build_full_system_snapshot(db, user, light=True)
+        snapshot = _build_full_system_snapshot(db, user, light=False)
         payload = {
             "open_tasks": [
                 {"title": t.title, "priority": t.priority, "due_date": t.due_date.isoformat(), "status": t.status}
                 for t in open_todos
             ],
-            "context": snapshot,
+            "full_account_context": snapshot,
         }
         prompt = (
             "You are a task-management coach for a busy entrepreneur. Given their open task list "
-            "and brief business context, respond ONLY with a JSON array of 3-5 short, specific "
-            "feedback/advice strings about how they're managing their tasks — flag overdue items, "
-            "too many high-priority items, tasks with no clear next step, or good patterns to keep. "
-            "No preamble, no markdown fences.\n\n" + json.dumps(payload)
+            "and their full current business/account data, respond ONLY with a JSON array of 3-5 "
+            "short, specific feedback/advice strings about how they're managing their tasks — flag "
+            "overdue items, too many high-priority items, tasks with no clear next step, or good "
+            "patterns to keep. No preamble, no markdown fences.\n\n" + json.dumps(payload, default=str)
         )
-        text = _call_gemini(prompt)
+        text = _call_gemini(prompt, context="todo_list_feedback")
         parsed = _parse_json_array(text) if text else None
         if parsed and all(isinstance(x, str) for x in parsed):
             return {"feedback": parsed}
@@ -2069,7 +2092,7 @@ def analytics_forecast(months_history: int = 6, months_forward: int = 12,
 
 
 # ----------------------------------------------------------------------------
-# AI Advisor — Gemini-powered, with rule-based fallback
+# AI Advisor — Gemini-powered (sole AI provider), with rule-based fallback
 # ----------------------------------------------------------------------------
 
 def _rule_based_insights(db: Session, user: User) -> List[str]:
@@ -2126,36 +2149,14 @@ def _rule_based_insights(db: Session, user: User) -> List[str]:
     return insights[:6] or ["Keep logging transactions — insights get sharper with more data."]
 
 
-def _build_financial_snapshot(db: Session, user: User) -> dict:
-    today = date.today()
-    month_start = today.replace(day=1)
-    businesses = db.query(Business).filter(Business.user_id == user.id).all()
-    return {
-        "currency": user.currency,
-        "businesses": [
-            {
-                "name": b.name,
-                "category": b.category,
-                "status": b.status,
-                "revenue_mtd": _sum_business_tx(db, user, b.id, "revenue", month_start, today),
-                "expense_mtd": _sum_business_tx(db, user, b.id, "expense", month_start, today),
-            }
-            for b in businesses
-        ],
-        "goals": [
-            {"name": g.name, "target": g.target_amount, "current": g.current_amount}
-            for g in db.query(Goal).filter(Goal.user_id == user.id, Goal.status == "active").all()
-        ],
-        "active_hotspots": db.query(Hotspot).filter(Hotspot.user_id == user.id, Hotspot.status == "active").count(),
-        "savings_balance": float(db.query(func.coalesce(func.sum(Savings.amount_saved), 0.0)).filter(Savings.user_id == user.id).scalar() or 0.0),
-    }
-
-
 def _build_full_system_snapshot(db: Session, user: User, light: bool = False) -> dict:
     """Builds a comprehensive snapshot of EVERYTHING the AI can see about
-    this user's account — every module in the system. Used by the AI Chat
-    assistant (and, in `light` form, by smaller AI helpers) so responses are
-    always grounded in the user's real, current data rather than guesses.
+    this user's account — every module in the system, pulled fresh from the
+    database. This is the single source of truth handed to Gemini for every
+    AI feature (advice, daily recommendations, todo feedback, chat) so
+    responses are always grounded in the user's real, current data rather
+    than guesses. `light=True` trims the heavier historical lists for
+    smaller/cheaper calls, but always includes current totals and balances.
     """
     today = date.today()
     month_start = today.replace(day=1)
@@ -2209,6 +2210,10 @@ def _build_full_system_snapshot(db: Session, user: User, light: bool = False) ->
         "execution_breakdown": breakdown,
     }
 
+    # Always include this extra depth too — "light" only exists to keep a
+    # couple of very small, latency-sensitive calls cheaper; every AI call
+    # in this app still gets the full financial picture above plus the
+    # following historical context unless explicitly trimmed.
     if not light:
         recent_journal = db.query(JournalEntry).filter(JournalEntry.user_id == user.id).order_by(JournalEntry.date.desc()).limit(5).all()
         snapshot["recent_journal"] = [
@@ -2231,20 +2236,175 @@ def _build_full_system_snapshot(db: Session, user: User, light: bool = False) ->
         ]
         daily_scores = db.query(DailyScore).filter(DailyScore.user_id == user.id).order_by(DailyScore.date.desc()).limit(14).all()
         snapshot["recent_daily_scores"] = [{"date": d.date.isoformat(), "score": d.score} for d in daily_scores]
+        savings_rows = db.query(Savings).filter(Savings.user_id == user.id).order_by(Savings.date.desc()).limit(10).all()
+        snapshot["recent_savings"] = [
+            {"date": s.date.isoformat(), "percentage": s.percentage, "amount_saved": s.amount_saved, "balance_after": s.balance_after}
+            for s in savings_rows
+        ]
 
     return snapshot
 
 
-def _call_gemini(prompt: str) -> Optional[str]:
+def _gemini_financial_insights(db: Session, user: User, fallback: List[str]) -> List[str]:
+    snapshot = _build_full_system_snapshot(db, user, light=False)
+    prompt = (
+        "You are a sharp, encouraging business advisor for a small entrepreneur running "
+        "multiple side businesses. Given this JSON snapshot of their FULL current account data "
+        "(businesses, goals, savings, investments, assets, hotspots, tasks, recent transactions, "
+        "recent journal entries, and daily scores), respond ONLY with a JSON array of 3-6 short, "
+        "concrete, specific insight strings (no preamble, no markdown fences, no numbering). "
+        "Mention business names and real numbers where useful. Cover: performance comparisons, "
+        "savings trend, goal progress, and any risk to flag.\n\n" + json.dumps(snapshot, default=str)
+    )
+    text = _call_gemini(prompt, context="financial_insights")
+    parsed = _parse_json_array(text) if text else None
+    if parsed and all(isinstance(x, str) for x in parsed):
+        return parsed
+    return fallback
+
+
+@app.get("/ai/advice")
+def ai_advice(user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    fallback = _rule_based_insights(db, user)
+    insights = _gemini_financial_insights(db, user, fallback) if GEMINI_API_KEY else fallback
+    combined = " | ".join(insights)
+    db.add(AIInsightHistory(user_id=user.id, content=combined))
+    count = db.query(AIInsightHistory).filter(AIInsightHistory.user_id == user.id).count()
+    if count > 100:
+        oldest = db.query(AIInsightHistory).filter(AIInsightHistory.user_id == user.id).order_by(AIInsightHistory.created_at.asc()).first()
+        if oldest:
+            db.delete(oldest)
+    db.commit()
+    return {"insights": insights}
+
+
+_DEFAULT_DAILY_ROUTINES = [
+    "Log every sale and expense the moment it happens — don't rely on memory at day's end.",
+    "Spend 10 focused minutes on your lowest-performing business today.",
+    "Set aside a fixed percentage of today's profit before you spend any of it.",
+    "Write a 4-line journal entry tonight: what you did, a challenge, a lesson, one improvement for tomorrow.",
+    "Check in briefly on every active hotspot or business location at least every 3 days.",
+]
+
+
+@app.get("/ai/daily-recommendations")
+def ai_daily_recommendations(user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    """Gemini-powered daily activities, behaviors, habits and routines,
+    personalized from the user's FULL current account data (mission,
+    execution score, tasks, businesses, goals, savings, recent journal)."""
+    if not GEMINI_API_KEY:
+        return {"source": "rule_based", "recommendations": _DEFAULT_DAILY_ROUTINES}
+
+    snapshot = _build_full_system_snapshot(db, user, light=False)
+    prompt = (
+        "You are a disciplined personal-operations coach for an entrepreneur running several "
+        "small businesses toward a long-term financial mission. Given this JSON snapshot of their "
+        "FULL current account data, respond ONLY with a JSON array of 5-7 short, specific, "
+        "actionable daily activities, behaviors, habits, or routines the person should follow "
+        "TODAY to move their mission forward and raise tomorrow's execution score. No preamble, "
+        "no markdown fences, no numbering.\n\n" + json.dumps(snapshot, default=str)
+    )
+    text = _call_gemini(prompt, context="daily_recommendations")
+    parsed = _parse_json_array(text) if text else None
+    if parsed and all(isinstance(x, str) for x in parsed):
+        return {"source": "gemini", "recommendations": parsed}
+    return {"source": "rule_based", "recommendations": _DEFAULT_DAILY_ROUTINES}
+
+
+@app.get("/ai/insights/history")
+def ai_insights_history(limit: int = 25, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    rows = db.query(AIInsightHistory).filter(AIInsightHistory.user_id == user.id).order_by(AIInsightHistory.created_at.desc()).limit(limit).all()
+    return [{"id": r.id, "content": r.content, "created_at": r.created_at} for r in rows]
+
+
+# ----------------------------------------------------------------------------
+# Gemini client — single shared client + helpers, with real error logging
+# and a small in-memory "last error" record exposed via GET /ai/status so
+# failures (bad key, retired model, quota, network) are easy to diagnose
+# instead of silently falling back with no trace.
+# ----------------------------------------------------------------------------
+
+_gemini_client = None
+_GEMINI_LAST_ERROR: dict = {"context": None, "message": None, "at": None}
+_GEMINI_LAST_SUCCESS: dict = {"context": None, "at": None}
+
+
+def _get_gemini_client():
+    global _gemini_client
     if not GEMINI_API_KEY:
         return None
+    if _gemini_client is None:
+        from google import genai  # google-genai SDK (current, unified client)
+        _gemini_client = genai.Client(api_key=GEMINI_API_KEY)
+    return _gemini_client
+
+
+def _record_gemini_error(context: str, exc: Exception):
+    _GEMINI_LAST_ERROR["context"] = context
+    _GEMINI_LAST_ERROR["message"] = f"{type(exc).__name__}: {exc}"
+    _GEMINI_LAST_ERROR["at"] = utcnow().isoformat()
+    logger.error("Gemini call failed [%s]: %s", context, exc, exc_info=True)
+
+
+def _record_gemini_success(context: str):
+    _GEMINI_LAST_SUCCESS["context"] = context
+    _GEMINI_LAST_SUCCESS["at"] = utcnow().isoformat()
+
+
+def _call_gemini(prompt: str, context: str = "generic") -> Optional[str]:
+    """Single-turn Gemini call used by the advisor/insights/recommendations
+    endpoints. Returns None (never raises) if Gemini is unavailable or the
+    call fails — callers fall back to rule-based output — but every failure
+    is logged and recorded for GET /ai/status."""
+    if not GEMINI_API_KEY:
+        logger.warning("GEMINI_API_KEY is not set — skipping Gemini call [%s].", context)
+        return None
     try:
-        import google.generativeai as genai  # type: ignore
-        genai.configure(api_key=GEMINI_API_KEY)
-        model = genai.GenerativeModel("gemini-2.0-flash")
-        resp = model.generate_content(prompt)
-        return (resp.text or "").strip()
-    except Exception:
+        client = _get_gemini_client()
+        resp = client.models.generate_content(model=GEMINI_MODEL, contents=prompt)
+        text = (getattr(resp, "text", None) or "").strip()
+        if not text:
+            logger.warning("Gemini [%s] returned an empty response (prompt length %d).", context, len(prompt))
+            return None
+        _record_gemini_success(context)
+        return text
+    except Exception as exc:
+        _record_gemini_error(context, exc)
+        return None
+
+
+def _call_gemini_chat(system_context: str, history: List[dict], message: str) -> Optional[str]:
+    """Multi-turn Gemini call used by the AI Chat assistant. Sends the full
+    conversation history plus the current message, with the full system
+    snapshot injected as a system instruction so every reply is grounded in
+    the user's live account data."""
+    if not GEMINI_API_KEY:
+        logger.warning("GEMINI_API_KEY is not set — skipping Gemini chat call.")
+        return None
+    try:
+        from google import genai
+        from google.genai import types
+
+        client = _get_gemini_client()
+        contents = []
+        for h in history[-12:]:
+            role = "user" if h["role"] == "user" else "model"
+            contents.append(types.Content(role=role, parts=[types.Part(text=h["content"])]))
+        contents.append(types.Content(role="user", parts=[types.Part(text=message)]))
+
+        resp = client.models.generate_content(
+            model=GEMINI_MODEL,
+            contents=contents,
+            config=types.GenerateContentConfig(system_instruction=system_context),
+        )
+        text = (getattr(resp, "text", None) or "").strip()
+        if not text:
+            logger.warning("Gemini chat returned an empty response.")
+            return None
+        _record_gemini_success("chat")
+        return text
+    except Exception as exc:
+        _record_gemini_error("chat", exc)
         return None
 
 
@@ -2264,134 +2424,26 @@ def _parse_json_array(text: str) -> Optional[list]:
     return None
 
 
-def _gemini_financial_insights(db: Session, user: User, fallback: List[str]) -> List[str]:
-    snapshot = _build_financial_snapshot(db, user)
-    prompt = (
-        "You are a sharp, encouraging business advisor for a small entrepreneur running "
-        "multiple side businesses. Given this JSON financial snapshot, respond ONLY with a "
-        "JSON array of 3-6 short, concrete, specific insight strings (no preamble, no markdown "
-        "fences, no numbering). Mention business names and real numbers where useful. "
-        "Cover: performance comparisons, savings trend, goal progress, and any risk to flag.\n\n"
-        + json.dumps(snapshot)
-    )
-    text = _call_gemini(prompt)
-    parsed = _parse_json_array(text) if text else None
-    if parsed and all(isinstance(x, str) for x in parsed):
-        return parsed
-    return fallback
-
-
-@app.get("/ai/advice")
-def ai_advice(user: User = Depends(get_current_user), db: Session = Depends(get_db)):
-    fallback = _rule_based_insights(db, user)
-    if GEMINI_API_KEY:
-        insights = _gemini_financial_insights(db, user, fallback)
-    elif ANTHROPIC_API_KEY:
-        insights = _claude_insights(db, user, fallback)
-    else:
-        insights = fallback
-    combined = " | ".join(insights)
-    db.add(AIInsightHistory(user_id=user.id, content=combined))
-    count = db.query(AIInsightHistory).filter(AIInsightHistory.user_id == user.id).count()
-    if count > 100:
-        oldest = db.query(AIInsightHistory).filter(AIInsightHistory.user_id == user.id).order_by(AIInsightHistory.created_at.asc()).first()
-        if oldest:
-            db.delete(oldest)
-    db.commit()
-    return {"insights": insights}
-
-
-def _claude_insights(db: Session, user: User, fallback: List[str]) -> List[str]:
-    """Secondary provider — only used if GEMINI_API_KEY is not set."""
-    if not ANTHROPIC_API_KEY:
-        return fallback
-    try:
-        import anthropic  # type: ignore
-        client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
-        summary = _build_financial_snapshot(db, user)
-        msg = client.messages.create(
-            model="claude-sonnet-4-6",
-            max_tokens=500,
-            messages=[{
-                "role": "user",
-                "content": (
-                    "You are a business advisor. Given this JSON snapshot of a small business "
-                    "owner's finances, respond ONLY with a JSON array of 3-5 short, concrete, "
-                    "actionable insight strings (no preamble, no markdown fences).\n\n"
-                    + json.dumps(summary)
-                ),
-            }],
-        )
-        text = "".join(b.text for b in msg.content if getattr(b, "type", "") == "text")
-        parsed = _parse_json_array(text)
-        if parsed and all(isinstance(x, str) for x in parsed):
-            return parsed
-    except Exception:
-        pass
-    return fallback
-
-
-_DEFAULT_DAILY_ROUTINES = [
-    "Log every sale and expense the moment it happens — don't rely on memory at day's end.",
-    "Spend 10 focused minutes on your lowest-performing business today.",
-    "Set aside a fixed percentage of today's profit before you spend any of it.",
-    "Write a 4-line journal entry tonight: what you did, a challenge, a lesson, one improvement for tomorrow.",
-    "Check in briefly on every active hotspot or business location at least every 3 days.",
-]
-
-
-@app.get("/ai/daily-recommendations")
-def ai_daily_recommendations(user: User = Depends(get_current_user), db: Session = Depends(get_db)):
-    """Gemini-powered daily activities, behaviors, habits and routines,
-    personalized from the user's mission, execution score, and recent journal."""
-    today = date.today()
-    score, breakdown, _, tasks_total, tasks_completed = _compute_execution_score(db, user, today)
-    mission = get_mission(user)
-    recent_journal = db.query(JournalEntry).filter(JournalEntry.user_id == user.id).order_by(JournalEntry.date.desc()).limit(3).all()
-
-    if not GEMINI_API_KEY:
-        return {"source": "rule_based", "recommendations": _DEFAULT_DAILY_ROUTINES}
-
-    payload = {
-        "mission_title": mission.title,
-        "mission_phase": mission.current_phase,
-        "percent_complete": mission.percent_complete,
-        "todays_execution_score": score,
-        "execution_breakdown": breakdown,
-        "todays_tasks_completed": f"{tasks_completed}/{tasks_total}",
-        "recent_journal_notes": [
-            {"date": j.date.isoformat(), "improve_tomorrow": j.improve_tomorrow}
-            for j in recent_journal
-        ],
+@app.get("/ai/status")
+def ai_status(user: User = Depends(get_current_user)):
+    """Diagnostic endpoint — check this first if AI features seem to be
+    silently falling back to rule-based output. Shows whether Gemini is
+    configured, which model is targeted, and the last error/success."""
+    return {
+        "gemini_configured": bool(GEMINI_API_KEY),
+        "gemini_model": GEMINI_MODEL,
+        "last_error": _GEMINI_LAST_ERROR,
+        "last_success": _GEMINI_LAST_SUCCESS,
     }
-    prompt = (
-        "You are a disciplined personal-operations coach for an entrepreneur running several "
-        "small businesses toward a long-term financial mission. Given this JSON status, respond "
-        "ONLY with a JSON array of 5-7 short, specific, actionable daily activities, behaviors, "
-        "habits, or routines the person should follow TODAY to move their mission forward and "
-        "raise tomorrow's execution score. No preamble, no markdown fences, no numbering.\n\n"
-        + json.dumps(payload)
-    )
-    text = _call_gemini(prompt)
-    parsed = _parse_json_array(text) if text else None
-    if parsed and all(isinstance(x, str) for x in parsed):
-        return {"source": "gemini", "recommendations": parsed}
-    return {"source": "rule_based", "recommendations": _DEFAULT_DAILY_ROUTINES}
-
-
-@app.get("/ai/insights/history")
-def ai_insights_history(limit: int = 25, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
-    rows = db.query(AIInsightHistory).filter(AIInsightHistory.user_id == user.id).order_by(AIInsightHistory.created_at.desc()).limit(limit).all()
-    return [{"id": r.id, "content": r.content, "created_at": r.created_at} for r in rows]
 
 
 # ----------------------------------------------------------------------------
-# AI Chat — full-system-aware conversational advisor
+# AI Chat — full-system-aware conversational advisor (Gemini only)
 # ----------------------------------------------------------------------------
 
 def _rule_based_chat_reply(snapshot: dict, message: str) -> str:
-    """A minimal offline fallback so the chat still responds usefully with
-    no external AI provider configured."""
+    """A minimal offline fallback so the chat still responds usefully if
+    Gemini is not configured or a call fails."""
     lower = message.lower()
     if "task" in lower or "todo" in lower:
         tasks = snapshot.get("all_open_tasks", [])
@@ -2413,6 +2465,12 @@ def _rule_based_chat_reply(snapshot: dict, message: str) -> str:
             return "You haven't added any businesses yet — add one and I can start comparing performance."
         lines = [f"{b['name']}: revenue {b['revenue_mtd']:,.0f}, expenses {b['expense_mtd']:,.0f}" for b in biz[:3]]
         return "This month so far — " + "; ".join(lines)
+    if not GEMINI_API_KEY:
+        return (
+            "Gemini isn't configured for this account yet (no GEMINI_API_KEY set on the backend), "
+            "so I can only give you basic offline answers right now. Ask about your tasks, goals, "
+            "businesses, savings, or today's score."
+        )
     return (
         f"I'm tracking your full system — {len(snapshot.get('businesses', []))} business(es), "
         f"{len(snapshot.get('goals', []))} goal(s), and today's execution score of "
@@ -2421,46 +2479,17 @@ def _rule_based_chat_reply(snapshot: dict, message: str) -> str:
     )
 
 
-def _call_gemini_chat(system_context: str, history: List[dict], message: str) -> Optional[str]:
-    if not GEMINI_API_KEY:
-        return None
-    try:
-        import google.generativeai as genai  # type: ignore
-        genai.configure(api_key=GEMINI_API_KEY)
-        model = genai.GenerativeModel("gemini-2.0-flash", system_instruction=system_context)
-        convo = []
-        for h in history[-12:]:
-            convo.append({"role": "user" if h["role"] == "user" else "model", "parts": [h["content"]]})
-        chat = model.start_chat(history=convo)
-        resp = chat.send_message(message)
-        return (resp.text or "").strip()
-    except Exception:
-        return None
-
-
-def _call_claude_chat(system_context: str, history: List[dict], message: str) -> Optional[str]:
-    if not ANTHROPIC_API_KEY:
-        return None
-    try:
-        import anthropic  # type: ignore
-        client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
-        msgs = [{"role": h["role"], "content": h["content"]} for h in history[-12:]]
-        msgs.append({"role": "user", "content": message})
-        resp = client.messages.create(
-            model="claude-sonnet-4-6", max_tokens=700, system=system_context, messages=msgs,
-        )
-        return "".join(b.text for b in resp.content if getattr(b, "type", "") == "text").strip()
-    except Exception:
-        return None
-
-
 @app.post("/ai/chat", response_model=ChatOut)
 def ai_chat(body: ChatIn, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     """Conversational AI Advisor that is aware of everything running in the
     system for this user: every business, transaction summary, goal, savings
     balance, hotspot, task, journal note, notification, mission status and
-    daily score. The full snapshot is rebuilt fresh on every message so the
-    assistant is always grounded in current data."""
+    daily score. The full snapshot is rebuilt fresh from the database on
+    every message, and the recent conversation history is sent alongside it,
+    so Gemini is always grounded in current data and stays context-aware
+    across turns. Gemini is the sole AI provider — if it's unavailable or a
+    call fails, a lightweight rule-based reply is used instead so the chat
+    never hard-fails."""
     message = body.message.strip()
     if not message:
         raise HTTPException(status_code=400, detail="Message cannot be empty.")
@@ -2472,20 +2501,19 @@ def ai_chat(body: ChatIn, user: User = Depends(get_current_user), db: Session = 
     system_context = (
         "You are the AI Advisor inside this user's Business Growth Tracker app. You are fully "
         "aware of everything running in their system — every business, every transaction summary, "
-        "every goal, savings balance, active hotspots, today's tasks, recent journal entries, "
-        "unread notifications, mission status, and daily execution scores. Use this JSON snapshot "
-        "of their live data to answer specifically and accurately, referencing real numbers and "
-        "names where relevant. Be direct, encouraging, and concise (usually under 120 words unless "
-        "the question needs more). If asked to analyze the whole system, walk through the key "
-        "modules briefly. If data for something is missing, say so plainly instead of guessing.\n\n"
-        "CURRENT SYSTEM SNAPSHOT (JSON):\n" + json.dumps(snapshot, default=str)
+        "every goal, savings balance, active hotspots, today's tasks, all currently open tasks, "
+        "recent journal entries, recent savings deposits, unread notifications, mission status, "
+        "and recent daily execution scores. Use this JSON snapshot of their live data, pulled "
+        "fresh from the database for this message, to answer specifically and accurately, "
+        "referencing real numbers and names where relevant. Be direct, encouraging, and concise "
+        "(usually under 120 words unless the question needs more). If asked to analyze the whole "
+        "system, walk through the key modules briefly. If data for something is missing, say so "
+        "plainly instead of guessing. Keep track of the conversation so far and stay consistent "
+        "with anything you or the user said earlier in this chat.\n\n"
+        "CURRENT SYSTEM SNAPSHOT (JSON, live from the database):\n" + json.dumps(snapshot, default=str)
     )
 
-    reply = None
-    if GEMINI_API_KEY:
-        reply = _call_gemini_chat(system_context, history, message)
-    if not reply and ANTHROPIC_API_KEY:
-        reply = _call_claude_chat(system_context, history, message)
+    reply = _call_gemini_chat(system_context, history, message)
     if not reply:
         reply = _rule_based_chat_reply(snapshot, message)
 
