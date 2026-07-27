@@ -1,58 +1,3 @@
-"""
-Business Growth Tracker AI — Backend (Business Operating System edition)
-=========================================================================
-
-Single-file FastAPI backend. Builds on the original Growth Tracker API and
-adds the Business Operating System (BOS) feature set:
-
-  Mission Control:   GET/PUT /mission
-  Execution Score:   GET /execution-score/today, GET /execution-score/history
-  Journal:           GET/POST/PUT/DELETE /journal, GET /journal/search
-  Timeline:          GET/POST/DELETE /timeline
-  Business Empire:   GET /business-empire
-  Income mix:        GET /income-distribution
-  Reviews:           GET /reviews/weekly, GET /reviews/monthly
-  AI Advisor:        GET /ai/advice (financial insights)
-                     GET /ai/daily-recommendations (habits/routines for today)
-                     POST /ai/chat (full-system-aware chat assistant)
-  Todos:             GET/POST/PUT/DELETE /todos, GET /ai/todo-feedback
-  Notifications:     GET /notifications, PUT /notifications/{id}/read,
-                     POST /notifications/check (runs all smart-notification rules)
-
-All original endpoints (auth, businesses, transactions, savings, hotspots,
-investments, assets, goals, dashboard, reports) are preserved.
-
-Storage: PostgreSQL (Neon) via SQLAlchemy, falls back to sqlite if
-DATABASE_URL is unset. Auth: JWT bearer tokens.
-
-Run locally:
-    pip install -r requirements.txt
-    uvicorn main:app --reload
-
-Environment variables:
-    SECRET_KEY          — JWT signing secret
-    DATABASE_URL         — defaults to sqlite:///./growth_tracker.db
-    GEMINI_API_KEY        — REQUIRED for all AI features. Gemini is the sole
-                           AI provider in this backend: the AI Advisor, the
-                           Daily Recommendations engine, the Todo feedback
-                           engine, and the AI Chat assistant all call
-                           Google's Gemini API via the `google-genai` SDK.
-                           If unset (or a call fails), a built-in rule-based
-                           fallback is used instead so the app keeps working,
-                           but no AI provider is contacted in that case.
-    GEMINI_MODEL          — optional, defaults to "gemini-3.5-flash" (the
-                           current generally-available Gemini Flash model).
-                           Override if you want to pin a different model,
-                           e.g. "gemini-3.6-flash".
-
-Dependency note: this file uses the current unified `google-genai` SDK
-(`pip install google-genai`), NOT the older/deprecated `google-generativeai`
-package. Also note that Gemini model names are periodically retired by
-Google (e.g. gemini-2.0-flash was shut down on 2026-06-01) — if AI calls
-stop working, check GET /ai/status first and update GEMINI_MODEL if Google
-has retired the configured model.
-"""
-
 import os
 import hmac
 import hashlib
@@ -96,7 +41,7 @@ DATABASE_URL = os.environ.get(
     "postgresql://neondb_owner:npg_plvPhjQ4GFE8@ep-polished-sound-aypwc5kt-pooler.c-5.us-east-2.aws.neon.tech/neondb?sslmode=require&channel_binding=require",
 )
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
-GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-3.5-flash")
+GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-2.5-flash")
 
 CURRENCIES = {"UGX", "USD", "KES", "EUR", "GBP"}
 
