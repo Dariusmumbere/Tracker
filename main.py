@@ -14,6 +14,8 @@ adds the Business Operating System (BOS) feature set:
   Reviews:           GET /reviews/weekly, GET /reviews/monthly
   AI Advisor:        GET /ai/advice (financial insights)
                      GET /ai/daily-recommendations (habits/routines for today)
+                     POST /ai/chat (full-system-aware chat assistant)
+  Todos:             GET/POST/PUT/DELETE /todos, GET /ai/todo-feedback
   Notifications:     GET /notifications, PUT /notifications/{id}/read,
                      POST /notifications/check (runs all smart-notification rules)
 
@@ -30,13 +32,14 @@ Run locally:
 Environment variables:
     SECRET_KEY          — JWT signing secret
     DATABASE_URL         — defaults to sqlite:///./growth_tracker.db
-    GEMINI_API_KEY        — optional. If set, the AI Advisor and the Daily
-                           Recommendations engine call Google's Gemini API
+    GEMINI_API_KEY        — optional. If set, the AI Advisor, the Daily
+                           Recommendations engine, the Todo feedback engine,
+                           and the AI Chat assistant call Google's Gemini API
                            (google-generativeai) for richer, personalized
                            output. If unset, a built-in rule-based advisor
                            is used instead (no external calls at all).
-    ANTHROPIC_API_KEY    — optional secondary provider for /ai/advice; only
-                           used if GEMINI_API_KEY is not set.
+    ANTHROPIC_API_KEY    — optional secondary provider for /ai/advice and
+                           /ai/chat; only used if GEMINI_API_KEY is not set.
 """
 
 import os
@@ -135,6 +138,9 @@ class User(Base):
     journal_entries = relationship("JournalEntry", back_populates="owner", cascade="all, delete-orphan")
     milestones = relationship("Milestone", back_populates="owner", cascade="all, delete-orphan")
     execution_scores = relationship("ExecutionScore", back_populates="owner", cascade="all, delete-orphan")
+    todos = relationship("Todo", back_populates="owner", cascade="all, delete-orphan")
+    daily_scores = relationship("DailyScore", back_populates="owner", cascade="all, delete-orphan")
+    chat_messages = relationship("ChatMessage", back_populates="owner", cascade="all, delete-orphan")
 
 
 class Business(Base):
@@ -300,6 +306,53 @@ class ExecutionScore(Base):
     created_at = Column(DateTime, default=utcnow)
 
     owner = relationship("User", back_populates="execution_scores")
+
+
+class Todo(Base):
+    """A single task. Tasks are the atomic unit the daily score is graded on."""
+    __tablename__ = "todos"
+    id = Column(Integer, primary_key=True, index=True)
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=False, index=True)
+    title = Column(String, nullable=False)
+    notes = Column(String, default="")
+    priority = Column(String, default="medium")  # low | medium | high
+    business_id = Column(Integer, ForeignKey("businesses.id"), nullable=True)
+    due_date = Column(Date, default=lambda: date.today(), index=True)
+    status = Column(String, default="pending")  # pending | in_progress | completed | abandoned
+    ai_feedback = Column(String, default="")
+    created_at = Column(DateTime, default=utcnow)
+    completed_at = Column(DateTime, nullable=True)
+
+    owner = relationship("User", back_populates="todos")
+
+
+class DailyScore(Base):
+    """Persisted daily score record — one row per user per day, kept
+    permanently as a historical log (separate from the live-recomputed
+    ExecutionScore snapshot, this is the immutable end-of-day record)."""
+    __tablename__ = "daily_scores"
+    id = Column(Integer, primary_key=True, index=True)
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=False, index=True)
+    date = Column(Date, default=lambda: date.today(), index=True)
+    score = Column(Float, default=0)
+    tasks_total = Column(Integer, default=0)
+    tasks_completed = Column(Integer, default=0)
+    breakdown_json = Column(String, default="{}")
+    created_at = Column(DateTime, default=utcnow)
+
+    owner = relationship("User", back_populates="daily_scores")
+
+
+class ChatMessage(Base):
+    """Persisted AI Advisor chat history, per user."""
+    __tablename__ = "chat_messages"
+    id = Column(Integer, primary_key=True, index=True)
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=False, index=True)
+    role = Column(String, nullable=False)  # user | assistant
+    content = Column(String, nullable=False)
+    created_at = Column(DateTime, default=utcnow)
+
+    owner = relationship("User", back_populates="chat_messages")
 
 
 Base.metadata.create_all(bind=engine)
@@ -583,6 +636,13 @@ class GoalUpdateIn(BaseModel):
     deadline: Optional[date] = None
     status: Optional[str] = None
 
+    @field_validator("status")
+    @classmethod
+    def status_valid(cls, v):
+        if v is not None and v not in ("active", "completed", "abandoned"):
+            raise ValueError("status must be one of: active, completed, abandoned")
+        return v
+
 
 class GoalOut(BaseModel):
     id: int
@@ -675,10 +735,92 @@ class ExecutionScoreOut(BaseModel):
 
 
 # ----------------------------------------------------------------------------
+# Pydantic schemas — Todos / Daily Score / Chat
+# ----------------------------------------------------------------------------
+
+class TodoIn(BaseModel):
+    title: str
+    notes: str = ""
+    priority: str = "medium"
+    business_id: Optional[int] = None
+    due_date: Optional[date] = None
+
+    @field_validator("priority")
+    @classmethod
+    def priority_valid(cls, v):
+        return v if v in ("low", "medium", "high") else "medium"
+
+
+class TodoUpdateIn(BaseModel):
+    title: Optional[str] = None
+    notes: Optional[str] = None
+    priority: Optional[str] = None
+    business_id: Optional[int] = None
+    due_date: Optional[date] = None
+    status: Optional[str] = None
+
+    @field_validator("priority")
+    @classmethod
+    def priority_valid(cls, v):
+        if v is not None and v not in ("low", "medium", "high"):
+            raise ValueError("priority must be one of: low, medium, high")
+        return v
+
+    @field_validator("status")
+    @classmethod
+    def status_valid(cls, v):
+        if v is not None and v not in ("pending", "in_progress", "completed", "abandoned"):
+            raise ValueError("status must be one of: pending, in_progress, completed, abandoned")
+        return v
+
+
+class TodoOut(BaseModel):
+    id: int
+    title: str
+    notes: str
+    priority: str
+    business_id: Optional[int]
+    due_date: Optional[date]
+    status: str
+    ai_feedback: str
+    created_at: dt
+    completed_at: Optional[dt]
+
+    class Config:
+        from_attributes = True
+
+
+class DailyScoreOut(BaseModel):
+    date: date
+    score: float
+    tasks_total: int
+    tasks_completed: int
+    breakdown: dict
+
+
+class ChatIn(BaseModel):
+    message: str
+
+
+class ChatOut(BaseModel):
+    reply: str
+
+
+class ChatHistoryOut(BaseModel):
+    id: int
+    role: str
+    content: str
+    created_at: dt
+
+    class Config:
+        from_attributes = True
+
+
+# ----------------------------------------------------------------------------
 # App
 # ----------------------------------------------------------------------------
 
-app = FastAPI(title="Business Growth Tracker AI API", version="2.0.0")
+app = FastAPI(title="Business Growth Tracker AI API", version="2.1.0")
 
 app.add_middleware(
     CORSMiddleware,
@@ -1039,7 +1181,15 @@ def delete_asset(asset_id: int, user: User = Depends(get_current_user), db: Sess
 
 
 # ----------------------------------------------------------------------------
-# Goals — now with estimated completion date + status
+# Goals — with estimated completion date + status
+#
+# NOTE: update_goal / delete_goal below both filter strictly on
+# (Goal.id == goal_id, Goal.user_id == user.id). If a goal fails to update
+# or delete from the UI, it is almost always because the goal_id being sent
+# no longer matches a row owned by the logged-in user (stale client-side
+# cache) — the routes themselves accept partial updates and always commit.
+# Both endpoints below now also return a clear 404 message and the update
+# endpoint accepts every editable field, including status transitions.
 # ----------------------------------------------------------------------------
 
 def _estimate_goal_completion(db: Session, user: User, g: Goal) -> Optional[date]:
@@ -1093,20 +1243,38 @@ def create_goal(body: GoalIn, user: User = Depends(get_current_user), db: Sessio
     return _goal_out(db, user, g)
 
 
+@app.get("/goals/{goal_id}", response_model=GoalOut)
+def get_goal(goal_id: int, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    g = db.query(Goal).filter(Goal.id == goal_id, Goal.user_id == user.id).first()
+    if not g:
+        raise HTTPException(status_code=404, detail=f"Goal {goal_id} not found for this account.")
+    return _goal_out(db, user, g)
+
+
 @app.put("/goals/{goal_id}", response_model=GoalOut)
 def update_goal(goal_id: int, body: GoalUpdateIn, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     g = db.query(Goal).filter(Goal.id == goal_id, Goal.user_id == user.id).first()
     if not g:
-        raise HTTPException(status_code=404, detail="Goal not found.")
-    for field in ("name", "target_amount", "deadline", "status"):
-        val = getattr(body, field)
-        if val is not None:
-            setattr(g, field, val)
+        raise HTTPException(status_code=404, detail=f"Goal {goal_id} not found for this account.")
+    if body.name is not None:
+        name = body.name.strip()
+        if name:
+            g.name = name
+    if body.target_amount is not None:
+        if body.target_amount <= 0:
+            raise HTTPException(status_code=400, detail="Target amount must be greater than zero.")
+        g.target_amount = body.target_amount
+    if body.deadline is not None:
+        g.deadline = body.deadline
     if body.current_amount is not None:
-        g.current_amount = body.current_amount
-    if g.target_amount and g.current_amount >= g.target_amount and g.status == "active":
+        g.current_amount = max(0.0, body.current_amount)
+    if body.status is not None:
+        g.status = body.status
+    # Auto-complete when the target is reached, unless the user explicitly
+    # set a different status in this same request.
+    if g.target_amount and g.current_amount >= g.target_amount and g.status == "active" and body.status is None:
         g.status = "completed"
-        db.add(Notification(user_id=user.id, kind="success", message=f"Goal '{g.name}' reached! 🎉"))
+        db.add(Notification(user_id=user.id, kind="success", message=f"Goal '{g.name}' reached! \U0001F389"))
     db.commit()
     db.refresh(g)
     return _goal_out(db, user, g)
@@ -1116,7 +1284,7 @@ def update_goal(goal_id: int, body: GoalUpdateIn, user: User = Depends(get_curre
 def delete_goal(goal_id: int, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     g = db.query(Goal).filter(Goal.id == goal_id, Goal.user_id == user.id).first()
     if not g:
-        raise HTTPException(status_code=404, detail="Goal not found.")
+        raise HTTPException(status_code=404, detail=f"Goal {goal_id} not found for this account.")
     db.delete(g)
     db.commit()
     return {"ok": True}
@@ -1266,7 +1434,172 @@ def delete_milestone(milestone_id: int, user: User = Depends(get_current_user), 
 
 
 # ----------------------------------------------------------------------------
-# Daily Execution Score (auto-computed from real data — no manual checklist)
+# Todos — tasks the daily score is graded against
+# ----------------------------------------------------------------------------
+
+def _todo_out(t: Todo) -> TodoOut:
+    return TodoOut(
+        id=t.id, title=t.title, notes=t.notes, priority=t.priority, business_id=t.business_id,
+        due_date=t.due_date, status=t.status, ai_feedback=t.ai_feedback or "",
+        created_at=t.created_at, completed_at=t.completed_at,
+    )
+
+
+@app.get("/todos", response_model=List[TodoOut])
+def list_todos(
+    due_date: Optional[date] = None,
+    status_filter: Optional[str] = Query(None, alias="status"),
+    business_id: Optional[int] = None,
+    limit: int = Query(200, le=1000),
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    q = db.query(Todo).filter(Todo.user_id == user.id)
+    if due_date:
+        q = q.filter(Todo.due_date == due_date)
+    if status_filter:
+        q = q.filter(Todo.status == status_filter)
+    if business_id:
+        q = q.filter(Todo.business_id == business_id)
+    rows = q.order_by(Todo.due_date.asc(), Todo.created_at.desc()).limit(limit).all()
+    return [_todo_out(t) for t in rows]
+
+
+def _generate_todo_feedback(db: Session, user: User, t: Todo) -> str:
+    """Short, immediate AI-style feedback on a single newly-created task,
+    using Gemini if available, else a rule-based heuristic."""
+    if GEMINI_API_KEY:
+        snapshot = _build_full_system_snapshot(db, user, light=True)
+        prompt = (
+            "You are a business task coach. A user just added this task to their todo list: "
+            + json.dumps({"title": t.title, "notes": t.notes, "priority": t.priority, "due_date": t.due_date.isoformat() if t.due_date else None})
+            + ". Here is brief context on their business situation: " + json.dumps(snapshot)
+            + ". Respond with ONE short sentence (max 25 words) of direct, useful feedback or "
+              "advice on this specific task — no preamble, no markdown, plain text only."
+        )
+        text = _call_gemini(prompt)
+        if text:
+            return text.strip().strip('"')
+    # Rule-based fallback
+    title_lower = t.title.lower()
+    if t.priority == "high":
+        return "Marked high priority — tackle this first today before anything else slips."
+    if any(k in title_lower for k in ("call", "follow up", "follow-up", "meet", "visit")):
+        return "A people-facing task — do it earlier in the day while energy and availability are highest."
+    if any(k in title_lower for k in ("pay", "invoice", "expense", "record", "log")):
+        return "A record-keeping task — small but it keeps your numbers accurate, don't let it slide."
+    return "Added to today's list — break it down further if it feels too big to start."
+
+
+@app.post("/todos", response_model=TodoOut)
+def create_todo(body: TodoIn, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    if body.business_id:
+        _get_owned_business(db, user, body.business_id)
+    t = Todo(
+        user_id=user.id, title=body.title.strip(), notes=body.notes or "", priority=body.priority,
+        business_id=body.business_id, due_date=body.due_date or date.today(),
+    )
+    db.add(t)
+    db.commit()
+    db.refresh(t)
+    try:
+        t.ai_feedback = _generate_todo_feedback(db, user, t)
+        db.commit()
+        db.refresh(t)
+    except Exception:
+        pass
+    return _todo_out(t)
+
+
+@app.put("/todos/{todo_id}", response_model=TodoOut)
+def update_todo(todo_id: int, body: TodoUpdateIn, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    t = db.query(Todo).filter(Todo.id == todo_id, Todo.user_id == user.id).first()
+    if not t:
+        raise HTTPException(status_code=404, detail="Task not found.")
+    if body.title is not None:
+        t.title = body.title.strip()
+    if body.notes is not None:
+        t.notes = body.notes
+    if body.priority is not None:
+        t.priority = body.priority
+    if body.business_id is not None:
+        if body.business_id:
+            _get_owned_business(db, user, body.business_id)
+        t.business_id = body.business_id
+    if body.due_date is not None:
+        t.due_date = body.due_date
+    if body.status is not None:
+        was_completed = t.status == "completed"
+        t.status = body.status
+        if t.status == "completed" and not was_completed:
+            t.completed_at = utcnow()
+        elif t.status != "completed":
+            t.completed_at = None
+    db.commit()
+    db.refresh(t)
+    return _todo_out(t)
+
+
+@app.delete("/todos/{todo_id}")
+def delete_todo(todo_id: int, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    t = db.query(Todo).filter(Todo.id == todo_id, Todo.user_id == user.id).first()
+    if not t:
+        raise HTTPException(status_code=404, detail="Task not found.")
+    db.delete(t)
+    db.commit()
+    return {"ok": True}
+
+
+@app.get("/ai/todo-feedback")
+def ai_todo_feedback(user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    """Feedback and advice across the user's current open task list."""
+    today = date.today()
+    open_todos = db.query(Todo).filter(
+        Todo.user_id == user.id, Todo.status.in_(["pending", "in_progress"]), Todo.due_date <= today
+    ).order_by(Todo.due_date.asc()).all()
+
+    if not open_todos:
+        return {"feedback": ["You have no open tasks — add today's tasks so the AI can help you plan and score the day."]}
+
+    if GEMINI_API_KEY:
+        snapshot = _build_full_system_snapshot(db, user, light=True)
+        payload = {
+            "open_tasks": [
+                {"title": t.title, "priority": t.priority, "due_date": t.due_date.isoformat(), "status": t.status}
+                for t in open_todos
+            ],
+            "context": snapshot,
+        }
+        prompt = (
+            "You are a task-management coach for a busy entrepreneur. Given their open task list "
+            "and brief business context, respond ONLY with a JSON array of 3-5 short, specific "
+            "feedback/advice strings about how they're managing their tasks — flag overdue items, "
+            "too many high-priority items, tasks with no clear next step, or good patterns to keep. "
+            "No preamble, no markdown fences.\n\n" + json.dumps(payload)
+        )
+        text = _call_gemini(prompt)
+        parsed = _parse_json_array(text) if text else None
+        if parsed and all(isinstance(x, str) for x in parsed):
+            return {"feedback": parsed}
+
+    # Rule-based fallback
+    fb = []
+    overdue = [t for t in open_todos if t.due_date < today]
+    if overdue:
+        fb.append(f"You have {len(overdue)} overdue task(s) — clear or reschedule them before adding new ones.")
+    high = [t for t in open_todos if t.priority == "high"]
+    if len(high) > 3:
+        fb.append(f"{len(high)} tasks are marked high priority — that's too many to truly prioritize. Pick your top 1-3 for today.")
+    if len(open_todos) > 10:
+        fb.append("Your open task list is long. Consider batching or delegating the smaller ones.")
+    if not fb:
+        fb.append("Your task list looks manageable — good pace, keep completing them as you go.")
+    return {"feedback": fb}
+
+
+# ----------------------------------------------------------------------------
+# Daily Execution Score (auto-computed from real data, including task
+# completion) — no manual checklist required.
 # ----------------------------------------------------------------------------
 
 def _compute_execution_score(db: Session, user: User, on_date: date):
@@ -1298,12 +1631,20 @@ def _compute_execution_score(db: Session, user: User, on_date: date):
     breakdown["businesses_updated"] = f"{engaged}/{len(active_businesses)}" if active_businesses else "0/0"
     business_engagement_ratio = (engaged / len(active_businesses)) if active_businesses else 1.0
 
+    # Task completion for the day — tasks due today only.
+    tasks_due_today = db.query(Todo).filter(Todo.user_id == user.id, Todo.due_date == today).all()
+    tasks_total = len(tasks_due_today)
+    tasks_completed = len([t for t in tasks_due_today if t.status == "completed"])
+    task_ratio = (tasks_completed / tasks_total) if tasks_total else 1.0
+    breakdown["tasks_completed"] = f"{tasks_completed}/{tasks_total}" if tasks_total else "0/0"
+
     weights = {
-        "revenue_recorded": 25,
-        "expenses_recorded": 15,
-        "savings_updated": 15,
-        "journal_completed": 20,
-        "business_engagement": 25,
+        "revenue_recorded": 15,
+        "expenses_recorded": 10,
+        "savings_updated": 10,
+        "journal_completed": 15,
+        "business_engagement": 20,
+        "tasks_completed": 30,
     }
     score = 0.0
     score += weights["revenue_recorded"] if breakdown["revenue_recorded"] else 0
@@ -1311,9 +1652,14 @@ def _compute_execution_score(db: Session, user: User, on_date: date):
     score += weights["savings_updated"] if breakdown["savings_updated"] else 0
     score += weights["journal_completed"] if breakdown["journal_completed"] else 0
     score += weights["business_engagement"] * business_engagement_ratio
+    score += weights["tasks_completed"] * task_ratio
     score = round(min(100.0, score), 1)
 
     suggestions = []
+    if tasks_total and tasks_completed < tasks_total:
+        suggestions.append(f"You've completed {tasks_completed} of {tasks_total} tasks due today — finish the rest before the day ends.")
+    if not tasks_total:
+        suggestions.append("You have no tasks scheduled for today — add a few in the Todo list so progress is trackable.")
     if not breakdown["revenue_recorded"]:
         suggestions.append("Log today's revenue, even if it's small — consistency matters more than size.")
     if not breakdown["expenses_recorded"]:
@@ -1327,20 +1673,36 @@ def _compute_execution_score(db: Session, user: User, on_date: date):
     if not suggestions:
         suggestions.append("Great work today — keep the same routine tomorrow.")
 
-    return score, breakdown, suggestions
+    return score, breakdown, suggestions, tasks_total, tasks_completed
 
 
 @app.get("/execution-score/today", response_model=ExecutionScoreOut)
 def execution_score_today(user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     today = date.today()
-    score, breakdown, suggestions = _compute_execution_score(db, user, today)
+    score, breakdown, suggestions, tasks_total, tasks_completed = _compute_execution_score(db, user, today)
+
     existing = db.query(ExecutionScore).filter(ExecutionScore.user_id == user.id, ExecutionScore.date == today).first()
     if existing:
         existing.score = score
         existing.breakdown_json = json.dumps(breakdown)
     else:
         db.add(ExecutionScore(user_id=user.id, date=today, score=score, breakdown_json=json.dumps(breakdown)))
+
+    # Persist the permanent daily-score record too, so history survives even
+    # if ExecutionScore rows are ever pruned.
+    existing_daily = db.query(DailyScore).filter(DailyScore.user_id == user.id, DailyScore.date == today).first()
+    if existing_daily:
+        existing_daily.score = score
+        existing_daily.tasks_total = tasks_total
+        existing_daily.tasks_completed = tasks_completed
+        existing_daily.breakdown_json = json.dumps(breakdown)
+    else:
+        db.add(DailyScore(
+            user_id=user.id, date=today, score=score, tasks_total=tasks_total,
+            tasks_completed=tasks_completed, breakdown_json=json.dumps(breakdown),
+        ))
     db.commit()
+
     return ExecutionScoreOut(date=today, score=score, breakdown=breakdown, suggestions=suggestions)
 
 
@@ -1349,6 +1711,24 @@ def execution_score_history(days: int = 30, user: User = Depends(get_current_use
     start = date.today() - timedelta(days=days - 1)
     rows = db.query(ExecutionScore).filter(ExecutionScore.user_id == user.id, ExecutionScore.date >= start).order_by(ExecutionScore.date.asc()).all()
     return [{"date": r.date.isoformat(), "score": r.score} for r in rows]
+
+
+@app.get("/daily-scores", response_model=List[DailyScoreOut])
+def list_daily_scores(days: int = Query(60, le=1000), user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    """Permanent historical record of daily scores and task completion."""
+    start = date.today() - timedelta(days=days - 1)
+    rows = db.query(DailyScore).filter(DailyScore.user_id == user.id, DailyScore.date >= start).order_by(DailyScore.date.desc()).all()
+    out = []
+    for r in rows:
+        try:
+            breakdown = json.loads(r.breakdown_json or "{}")
+        except Exception:
+            breakdown = {}
+        out.append(DailyScoreOut(
+            date=r.date, score=r.score, tasks_total=r.tasks_total,
+            tasks_completed=r.tasks_completed, breakdown=breakdown,
+        ))
+    return out
 
 
 # ----------------------------------------------------------------------------
@@ -1466,6 +1846,13 @@ def run_smart_notifications(user: User = Depends(get_current_user), db: Session 
             msg = "You haven't logged anything today — record at least one transaction before the day ends."
             db.add(Notification(user_id=user.id, kind="warning", message=msg))
             created.append(msg)
+
+    # Tasks due today not yet completed, flagged in the afternoon-equivalent check
+    open_tasks_today = db.query(Todo).filter(Todo.user_id == user.id, Todo.due_date == today, Todo.status.in_(["pending", "in_progress"])).count()
+    if open_tasks_today > 0 and not _recent_notification_exists(db, user, "task(s) due today still open"):
+        msg = f"You have {open_tasks_today} task(s) due today still open — check your Todo list."
+        db.add(Notification(user_id=user.id, kind="warning", message=msg))
+        created.append(msg)
 
     # Weekly review due (Sunday)
     if today.weekday() == 6 and not _recent_notification_exists(db, user, "Weekly review is ready"):
@@ -1732,6 +2119,10 @@ def _rule_based_insights(db: Session, user: User) -> List[str]:
         pct = (nearest.current_amount / nearest.target_amount * 100) if nearest.target_amount else 0
         insights.append(f"You're {pct:.0f}% of the way to '{nearest.name}'. {nearest.target_amount - nearest.current_amount:,.0f} {user.currency} to go.")
 
+    today_open_tasks = db.query(Todo).filter(Todo.user_id == user.id, Todo.due_date == today, Todo.status.in_(["pending", "in_progress"])).count()
+    if today_open_tasks:
+        insights.append(f"You have {today_open_tasks} open task(s) due today — clearing them will directly raise today's execution score.")
+
     return insights[:6] or ["Keep logging transactions — insights get sharper with more data."]
 
 
@@ -1758,6 +2149,90 @@ def _build_financial_snapshot(db: Session, user: User) -> dict:
         "active_hotspots": db.query(Hotspot).filter(Hotspot.user_id == user.id, Hotspot.status == "active").count(),
         "savings_balance": float(db.query(func.coalesce(func.sum(Savings.amount_saved), 0.0)).filter(Savings.user_id == user.id).scalar() or 0.0),
     }
+
+
+def _build_full_system_snapshot(db: Session, user: User, light: bool = False) -> dict:
+    """Builds a comprehensive snapshot of EVERYTHING the AI can see about
+    this user's account — every module in the system. Used by the AI Chat
+    assistant (and, in `light` form, by smaller AI helpers) so responses are
+    always grounded in the user's real, current data rather than guesses.
+    """
+    today = date.today()
+    month_start = today.replace(day=1)
+
+    businesses = db.query(Business).filter(Business.user_id == user.id).all()
+    biz_snapshot = []
+    for b in businesses:
+        biz_snapshot.append({
+            "id": b.id, "name": b.name, "category": b.category, "status": b.status,
+            "revenue_mtd": _sum_business_tx(db, user, b.id, "revenue", month_start, today),
+            "expense_mtd": _sum_business_tx(db, user, b.id, "expense", month_start, today),
+        })
+
+    goals = db.query(Goal).filter(Goal.user_id == user.id).all()
+    goal_snapshot = [
+        {"name": g.name, "target": g.target_amount, "current": g.current_amount, "status": g.status,
+         "deadline": g.deadline.isoformat() if g.deadline else None}
+        for g in goals
+    ]
+
+    savings_balance = float(db.query(func.coalesce(func.sum(Savings.amount_saved), 0.0)).filter(Savings.user_id == user.id).scalar() or 0.0)
+    total_investments = float(db.query(func.coalesce(func.sum(Investment.cost), 0.0)).filter(Investment.user_id == user.id).scalar() or 0.0)
+    total_assets = float(db.query(func.coalesce(func.sum(Asset.current_value), 0.0)).filter(Asset.user_id == user.id).scalar() or 0.0)
+
+    hotspots = db.query(Hotspot).filter(Hotspot.user_id == user.id).all()
+    hotspot_snapshot = []
+    for h in hotspots:
+        mr, mp, roi, payback = _hotspot_metrics(h)
+        hotspot_snapshot.append({"location": h.location, "status": h.status, "monthly_profit": mp, "roi_percent": round(roi, 1)})
+
+    mission = get_mission(user)
+
+    todos_today = db.query(Todo).filter(Todo.user_id == user.id, Todo.due_date == today).all()
+    todo_snapshot = [{"title": t.title, "priority": t.priority, "status": t.status} for t in todos_today]
+
+    score, breakdown, _, tasks_total, tasks_completed = _compute_execution_score(db, user, today)
+
+    snapshot = {
+        "currency": user.currency,
+        "today": today.isoformat(),
+        "mission": {"title": mission.title, "phase": mission.current_phase, "percent_complete": mission.percent_complete},
+        "businesses": biz_snapshot,
+        "goals": goal_snapshot,
+        "savings_balance": savings_balance,
+        "total_investments": total_investments,
+        "total_assets": total_assets,
+        "net_worth": savings_balance + total_investments + total_assets,
+        "active_hotspots": hotspot_snapshot,
+        "todays_tasks": todo_snapshot,
+        "todays_execution_score": score,
+        "execution_breakdown": breakdown,
+    }
+
+    if not light:
+        recent_journal = db.query(JournalEntry).filter(JournalEntry.user_id == user.id).order_by(JournalEntry.date.desc()).limit(5).all()
+        snapshot["recent_journal"] = [
+            {"date": j.date.isoformat(), "accomplished": j.accomplished, "challenges": j.challenges, "learned": j.learned}
+            for j in recent_journal
+        ]
+        recent_tx = db.query(Transaction).filter(Transaction.user_id == user.id).order_by(Transaction.date.desc()).limit(20).all()
+        snapshot["recent_transactions"] = [
+            {"date": t.date.isoformat(), "type": t.type, "amount": t.amount, "category": t.category, "business_id": t.business_id}
+            for t in recent_tx
+        ]
+        milestones = db.query(Milestone).filter(Milestone.user_id == user.id).order_by(Milestone.milestone_date.desc()).limit(10).all()
+        snapshot["recent_milestones"] = [{"date": m.milestone_date.isoformat(), "title": m.title} for m in milestones]
+        unread_notifs = db.query(Notification).filter(Notification.user_id == user.id, Notification.is_read == False).order_by(Notification.created_at.desc()).limit(10).all()  # noqa: E712
+        snapshot["unread_notifications"] = [n.message for n in unread_notifs]
+        all_open_todos = db.query(Todo).filter(Todo.user_id == user.id, Todo.status.in_(["pending", "in_progress"])).order_by(Todo.due_date.asc()).limit(30).all()
+        snapshot["all_open_tasks"] = [
+            {"title": t.title, "priority": t.priority, "due_date": t.due_date.isoformat(), "status": t.status}
+            for t in all_open_todos
+        ]
+        daily_scores = db.query(DailyScore).filter(DailyScore.user_id == user.id).order_by(DailyScore.date.desc()).limit(14).all()
+        snapshot["recent_daily_scores"] = [{"date": d.date.isoformat(), "score": d.score} for d in daily_scores]
+
+    return snapshot
 
 
 def _call_gemini(prompt: str) -> Optional[str]:
@@ -1870,7 +2345,7 @@ def ai_daily_recommendations(user: User = Depends(get_current_user), db: Session
     """Gemini-powered daily activities, behaviors, habits and routines,
     personalized from the user's mission, execution score, and recent journal."""
     today = date.today()
-    score, breakdown, _ = _compute_execution_score(db, user, today)
+    score, breakdown, _, tasks_total, tasks_completed = _compute_execution_score(db, user, today)
     mission = get_mission(user)
     recent_journal = db.query(JournalEntry).filter(JournalEntry.user_id == user.id).order_by(JournalEntry.date.desc()).limit(3).all()
 
@@ -1883,6 +2358,7 @@ def ai_daily_recommendations(user: User = Depends(get_current_user), db: Session
         "percent_complete": mission.percent_complete,
         "todays_execution_score": score,
         "execution_breakdown": breakdown,
+        "todays_tasks_completed": f"{tasks_completed}/{tasks_total}",
         "recent_journal_notes": [
             {"date": j.date.isoformat(), "improve_tomorrow": j.improve_tomorrow}
             for j in recent_journal
@@ -1907,6 +2383,135 @@ def ai_daily_recommendations(user: User = Depends(get_current_user), db: Session
 def ai_insights_history(limit: int = 25, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     rows = db.query(AIInsightHistory).filter(AIInsightHistory.user_id == user.id).order_by(AIInsightHistory.created_at.desc()).limit(limit).all()
     return [{"id": r.id, "content": r.content, "created_at": r.created_at} for r in rows]
+
+
+# ----------------------------------------------------------------------------
+# AI Chat — full-system-aware conversational advisor
+# ----------------------------------------------------------------------------
+
+def _rule_based_chat_reply(snapshot: dict, message: str) -> str:
+    """A minimal offline fallback so the chat still responds usefully with
+    no external AI provider configured."""
+    lower = message.lower()
+    if "task" in lower or "todo" in lower:
+        tasks = snapshot.get("all_open_tasks", [])
+        if not tasks:
+            return "You have no open tasks right now — add some in the Todo list and I can help you prioritize them."
+        top = ", ".join(t["title"] for t in tasks[:3])
+        return f"You have {len(tasks)} open task(s), including: {top}. Want help prioritizing them?"
+    if "score" in lower:
+        return f"Today's execution score is {snapshot.get('todays_execution_score', 0)}%. Complete your open tasks and log today's numbers to raise it."
+    if "goal" in lower:
+        goals = snapshot.get("goals", [])
+        if not goals:
+            return "You don't have any goals set yet — add one from the Goals page and I can track progress with you."
+        lines = [f"{g['name']}: {g['current']:,.0f}/{g['target']:,.0f}" for g in goals[:3]]
+        return "Here's where your goals stand — " + "; ".join(lines)
+    if "business" in lower or "profit" in lower:
+        biz = snapshot.get("businesses", [])
+        if not biz:
+            return "You haven't added any businesses yet — add one and I can start comparing performance."
+        lines = [f"{b['name']}: revenue {b['revenue_mtd']:,.0f}, expenses {b['expense_mtd']:,.0f}" for b in biz[:3]]
+        return "This month so far — " + "; ".join(lines)
+    return (
+        f"I'm tracking your full system — {len(snapshot.get('businesses', []))} business(es), "
+        f"{len(snapshot.get('goals', []))} goal(s), and today's execution score of "
+        f"{snapshot.get('todays_execution_score', 0)}%. Ask me about your tasks, goals, businesses, "
+        "savings, or what to focus on today."
+    )
+
+
+def _call_gemini_chat(system_context: str, history: List[dict], message: str) -> Optional[str]:
+    if not GEMINI_API_KEY:
+        return None
+    try:
+        import google.generativeai as genai  # type: ignore
+        genai.configure(api_key=GEMINI_API_KEY)
+        model = genai.GenerativeModel("gemini-2.0-flash", system_instruction=system_context)
+        convo = []
+        for h in history[-12:]:
+            convo.append({"role": "user" if h["role"] == "user" else "model", "parts": [h["content"]]})
+        chat = model.start_chat(history=convo)
+        resp = chat.send_message(message)
+        return (resp.text or "").strip()
+    except Exception:
+        return None
+
+
+def _call_claude_chat(system_context: str, history: List[dict], message: str) -> Optional[str]:
+    if not ANTHROPIC_API_KEY:
+        return None
+    try:
+        import anthropic  # type: ignore
+        client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
+        msgs = [{"role": h["role"], "content": h["content"]} for h in history[-12:]]
+        msgs.append({"role": "user", "content": message})
+        resp = client.messages.create(
+            model="claude-sonnet-4-6", max_tokens=700, system=system_context, messages=msgs,
+        )
+        return "".join(b.text for b in resp.content if getattr(b, "type", "") == "text").strip()
+    except Exception:
+        return None
+
+
+@app.post("/ai/chat", response_model=ChatOut)
+def ai_chat(body: ChatIn, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    """Conversational AI Advisor that is aware of everything running in the
+    system for this user: every business, transaction summary, goal, savings
+    balance, hotspot, task, journal note, notification, mission status and
+    daily score. The full snapshot is rebuilt fresh on every message so the
+    assistant is always grounded in current data."""
+    message = body.message.strip()
+    if not message:
+        raise HTTPException(status_code=400, detail="Message cannot be empty.")
+
+    snapshot = _build_full_system_snapshot(db, user, light=False)
+    history_rows = db.query(ChatMessage).filter(ChatMessage.user_id == user.id).order_by(ChatMessage.created_at.desc()).limit(12).all()
+    history = [{"role": h.role, "content": h.content} for h in reversed(history_rows)]
+
+    system_context = (
+        "You are the AI Advisor inside this user's Business Growth Tracker app. You are fully "
+        "aware of everything running in their system — every business, every transaction summary, "
+        "every goal, savings balance, active hotspots, today's tasks, recent journal entries, "
+        "unread notifications, mission status, and daily execution scores. Use this JSON snapshot "
+        "of their live data to answer specifically and accurately, referencing real numbers and "
+        "names where relevant. Be direct, encouraging, and concise (usually under 120 words unless "
+        "the question needs more). If asked to analyze the whole system, walk through the key "
+        "modules briefly. If data for something is missing, say so plainly instead of guessing.\n\n"
+        "CURRENT SYSTEM SNAPSHOT (JSON):\n" + json.dumps(snapshot, default=str)
+    )
+
+    reply = None
+    if GEMINI_API_KEY:
+        reply = _call_gemini_chat(system_context, history, message)
+    if not reply and ANTHROPIC_API_KEY:
+        reply = _call_claude_chat(system_context, history, message)
+    if not reply:
+        reply = _rule_based_chat_reply(snapshot, message)
+
+    db.add(ChatMessage(user_id=user.id, role="user", content=message))
+    db.add(ChatMessage(user_id=user.id, role="assistant", content=reply))
+    count = db.query(ChatMessage).filter(ChatMessage.user_id == user.id).count()
+    if count > 200:
+        oldest = db.query(ChatMessage).filter(ChatMessage.user_id == user.id).order_by(ChatMessage.created_at.asc()).limit(count - 200).all()
+        for o in oldest:
+            db.delete(o)
+    db.commit()
+
+    return ChatOut(reply=reply)
+
+
+@app.get("/ai/chat/history", response_model=List[ChatHistoryOut])
+def ai_chat_history(limit: int = Query(60, le=500), user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    rows = db.query(ChatMessage).filter(ChatMessage.user_id == user.id).order_by(ChatMessage.created_at.asc()).limit(limit).all()
+    return rows
+
+
+@app.delete("/ai/chat/history")
+def clear_ai_chat_history(user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    db.query(ChatMessage).filter(ChatMessage.user_id == user.id).delete()
+    db.commit()
+    return {"ok": True}
 
 
 # ----------------------------------------------------------------------------
@@ -1978,6 +2583,9 @@ def weekly_review(user: User = Depends(get_current_user), db: Session = Depends(
         ExecutionScore.user_id == user.id, ExecutionScore.date >= week_start, ExecutionScore.date <= today).all()
     avg_score = round(sum(s.score for s in scores) / len(scores), 1) if scores else None
 
+    week_tasks_total = db.query(Todo).filter(Todo.user_id == user.id, Todo.due_date >= week_start, Todo.due_date <= today).count()
+    week_tasks_done = db.query(Todo).filter(Todo.user_id == user.id, Todo.due_date >= week_start, Todo.due_date <= today, Todo.status == "completed").count()
+
     journal_entries = db.query(JournalEntry).filter(
         JournalEntry.user_id == user.id, JournalEntry.date >= week_start, JournalEntry.date <= today).order_by(JournalEntry.date.asc()).all()
     lessons = [j.learned for j in journal_entries if j.learned]
@@ -1991,6 +2599,8 @@ def weekly_review(user: User = Depends(get_current_user), db: Session = Depends(
         "savings_this_week": savings_this_week,
         "investments_this_week": investments_this_week,
         "tasks_completed_days": tasks_completed,
+        "week_tasks_total": week_tasks_total,
+        "week_tasks_done": week_tasks_done,
         "avg_execution_score": avg_score,
         "lessons_learned": lessons,
     }
@@ -2026,6 +2636,9 @@ def monthly_review(user: User = Depends(get_current_user), db: Session = Depends
         comparison.append({"name": b.name, "revenue": rev, "expense": exp, "profit": rev - exp})
     comparison.sort(key=lambda x: x["profit"], reverse=True)
 
+    month_tasks_total = db.query(Todo).filter(Todo.user_id == user.id, Todo.due_date >= month_start, Todo.due_date <= today).count()
+    month_tasks_done = db.query(Todo).filter(Todo.user_id == user.id, Todo.due_date >= month_start, Todo.due_date <= today, Todo.status == "completed").count()
+
     return {
         "month": month_start.strftime("%Y-%m"),
         "revenue": revenue, "expense": expense, "profit": profit,
@@ -2036,4 +2649,6 @@ def monthly_review(user: User = Depends(get_current_user), db: Session = Depends
         "investment_total": investments_now,
         "investment_growth": investments_now - investments_last_month,
         "business_comparison": comparison,
-}
+        "month_tasks_total": month_tasks_total,
+        "month_tasks_done": month_tasks_done,
+    }
