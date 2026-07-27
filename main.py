@@ -10,6 +10,7 @@ from datetime import datetime as dt, date, timedelta, timezone
 from typing import Optional, List
 
 import jwt
+import requests
 from fastapi import FastAPI, Depends, HTTPException, status, Query
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
@@ -40,8 +41,10 @@ DATABASE_URL = os.environ.get(
     "DATABASE_URL",
     "postgresql://neondb_owner:npg_plvPhjQ4GFE8@ep-polished-sound-aypwc5kt-pooler.c-5.us-east-2.aws.neon.tech/neondb?sslmode=require&channel_binding=require",
 )
-GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
-GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "llama-3.1-8b-instant")
+GROQ_API_KEY = os.environ.get("GROQ_API_KEY")
+GROQ_MODEL = os.environ.get("GROQ_MODEL", "llama-3.1-8b-instant")
+GROQ_API_URL = os.environ.get("GROQ_API_URL", "https://api.groq.com/openai/v1/chat/completions")
+GROQ_TIMEOUT_SECONDS = float(os.environ.get("GROQ_TIMEOUT_SECONDS", "60"))
 
 CURRENCIES = {"UGX", "USD", "KES", "EUR", "GBP"}
 
@@ -1433,9 +1436,9 @@ def list_todos(
 
 def _generate_todo_feedback(db: Session, user: User, t: Todo) -> str:
     """Short, immediate AI-style feedback on a single newly-created task,
-    using Gemini (with full account context) if available, else a
+    using Groq (with full account context) if available, else a
     rule-based heuristic."""
-    if GEMINI_API_KEY:
+    if GROQ_API_KEY:
         snapshot = _build_full_system_snapshot(db, user, light=False)
         prompt = (
             "You are a business task coach. A user just added this task to their todo list: "
@@ -1445,7 +1448,7 @@ def _generate_todo_feedback(db: Session, user: User, t: Todo) -> str:
             + ". Respond with ONE short sentence (max 25 words) of direct, useful feedback or "
               "advice on this specific task — no preamble, no markdown, plain text only."
         )
-        text = _call_gemini(prompt, context="todo_feedback")
+        text = _call_groq(prompt, context="todo_feedback")
         if text:
             return text.strip().strip('"')
     # Rule-based fallback
@@ -1529,7 +1532,7 @@ def ai_todo_feedback(user: User = Depends(get_current_user), db: Session = Depen
     if not open_todos:
         return {"feedback": ["You have no open tasks — add today's tasks so the AI can help you plan and score the day."]}
 
-    if GEMINI_API_KEY:
+    if GROQ_API_KEY:
         snapshot = _build_full_system_snapshot(db, user, light=False)
         payload = {
             "open_tasks": [
@@ -1545,7 +1548,7 @@ def ai_todo_feedback(user: User = Depends(get_current_user), db: Session = Depen
             "overdue items, too many high-priority items, tasks with no clear next step, or good "
             "patterns to keep. No preamble, no markdown fences.\n\n" + json.dumps(payload, default=str)
         )
-        text = _call_gemini(prompt, context="todo_list_feedback")
+        text = _call_groq(prompt, context="todo_list_feedback")
         parsed = _parse_json_array(text) if text else None
         if parsed and all(isinstance(x, str) for x in parsed):
             return {"feedback": parsed}
@@ -2037,7 +2040,7 @@ def analytics_forecast(months_history: int = 6, months_forward: int = 12,
 
 
 # ----------------------------------------------------------------------------
-# AI Advisor — Gemini-powered (sole AI provider), with rule-based fallback
+# AI Advisor — Groq-powered (sole AI provider), with rule-based fallback
 # ----------------------------------------------------------------------------
 
 def _rule_based_insights(db: Session, user: User) -> List[str]:
@@ -2097,7 +2100,7 @@ def _rule_based_insights(db: Session, user: User) -> List[str]:
 def _build_full_system_snapshot(db: Session, user: User, light: bool = False) -> dict:
     """Builds a comprehensive snapshot of EVERYTHING the AI can see about
     this user's account — every module in the system, pulled fresh from the
-    database. This is the single source of truth handed to Gemini for every
+    database. This is the single source of truth handed to Groq for every
     AI feature (advice, daily recommendations, todo feedback, chat) so
     responses are always grounded in the user's real, current data rather
     than guesses. `light=True` trims the heavier historical lists for
@@ -2190,7 +2193,7 @@ def _build_full_system_snapshot(db: Session, user: User, light: bool = False) ->
     return snapshot
 
 
-def _gemini_financial_insights(db: Session, user: User, fallback: List[str]) -> List[str]:
+def _groq_financial_insights(db: Session, user: User, fallback: List[str]) -> List[str]:
     snapshot = _build_full_system_snapshot(db, user, light=False)
     prompt = (
         "You are a sharp, encouraging business advisor for a small entrepreneur running "
@@ -2201,7 +2204,7 @@ def _gemini_financial_insights(db: Session, user: User, fallback: List[str]) -> 
         "Mention business names and real numbers where useful. Cover: performance comparisons, "
         "savings trend, goal progress, and any risk to flag.\n\n" + json.dumps(snapshot, default=str)
     )
-    text = _call_gemini(prompt, context="financial_insights")
+    text = _call_groq(prompt, context="financial_insights")
     parsed = _parse_json_array(text) if text else None
     if parsed and all(isinstance(x, str) for x in parsed):
         return parsed
@@ -2211,7 +2214,7 @@ def _gemini_financial_insights(db: Session, user: User, fallback: List[str]) -> 
 @app.get("/ai/advice")
 def ai_advice(user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     fallback = _rule_based_insights(db, user)
-    insights = _gemini_financial_insights(db, user, fallback) if GEMINI_API_KEY else fallback
+    insights = _groq_financial_insights(db, user, fallback) if GROQ_API_KEY else fallback
     combined = " | ".join(insights)
     db.add(AIInsightHistory(user_id=user.id, content=combined))
     count = db.query(AIInsightHistory).filter(AIInsightHistory.user_id == user.id).count()
@@ -2234,10 +2237,10 @@ _DEFAULT_DAILY_ROUTINES = [
 
 @app.get("/ai/daily-recommendations")
 def ai_daily_recommendations(user: User = Depends(get_current_user), db: Session = Depends(get_db)):
-    """Gemini-powered daily activities, behaviors, habits and routines,
+    """Groq-powered daily activities, behaviors, habits and routines,
     personalized from the user's FULL current account data (mission,
     execution score, tasks, businesses, goals, savings, recent journal)."""
-    if not GEMINI_API_KEY:
+    if not GROQ_API_KEY:
         return {"source": "rule_based", "recommendations": _DEFAULT_DAILY_ROUTINES}
 
     snapshot = _build_full_system_snapshot(db, user, light=False)
@@ -2249,10 +2252,10 @@ def ai_daily_recommendations(user: User = Depends(get_current_user), db: Session
         "TODAY to move their mission forward and raise tomorrow's execution score. No preamble, "
         "no markdown fences, no numbering.\n\n" + json.dumps(snapshot, default=str)
     )
-    text = _call_gemini(prompt, context="daily_recommendations")
+    text = _call_groq(prompt, context="daily_recommendations")
     parsed = _parse_json_array(text) if text else None
     if parsed and all(isinstance(x, str) for x in parsed):
-        return {"source": "gemini", "recommendations": parsed}
+        return {"source": "groq", "recommendations": parsed}
     return {"source": "rule_based", "recommendations": _DEFAULT_DAILY_ROUTINES}
 
 
@@ -2263,93 +2266,90 @@ def ai_insights_history(limit: int = 25, user: User = Depends(get_current_user),
 
 
 # ----------------------------------------------------------------------------
-# Gemini client — single shared client + helpers, with real error logging
-# and a small in-memory "last error" record exposed via GET /ai/status so
-# failures (bad key, retired model, quota, network) are easy to diagnose
-# instead of silently falling back with no trace.
+# Groq client — plain HTTP against the OpenAI-compatible /chat/completions
+# endpoint (no extra SDK dependency needed beyond `requests`), with real
+# error logging and a small in-memory "last error" record exposed via
+# GET /ai/status so failures (bad key, retired model, quota, network) are
+# easy to diagnose instead of silently falling back with no trace.
 # ----------------------------------------------------------------------------
 
-_gemini_client = None
-_GEMINI_LAST_ERROR: dict = {"context": None, "message": None, "at": None}
-_GEMINI_LAST_SUCCESS: dict = {"context": None, "at": None}
+_GROQ_LAST_ERROR: dict = {"context": None, "message": None, "at": None}
+_GROQ_LAST_SUCCESS: dict = {"context": None, "at": None}
 
 
-def _get_gemini_client():
-    global _gemini_client
-    if not GEMINI_API_KEY:
-        return None
-    if _gemini_client is None:
-        from google import genai  # google-genai SDK (current, unified client)
-        _gemini_client = genai.Client(api_key=GEMINI_API_KEY)
-    return _gemini_client
+def _record_groq_error(context: str, exc: Exception):
+    _GROQ_LAST_ERROR["context"] = context
+    _GROQ_LAST_ERROR["message"] = f"{type(exc).__name__}: {exc}"
+    _GROQ_LAST_ERROR["at"] = utcnow().isoformat()
+    logger.error("Groq call failed [%s]: %s", context, exc, exc_info=True)
 
 
-def _record_gemini_error(context: str, exc: Exception):
-    _GEMINI_LAST_ERROR["context"] = context
-    _GEMINI_LAST_ERROR["message"] = f"{type(exc).__name__}: {exc}"
-    _GEMINI_LAST_ERROR["at"] = utcnow().isoformat()
-    logger.error("Gemini call failed [%s]: %s", context, exc, exc_info=True)
+def _record_groq_success(context: str):
+    _GROQ_LAST_SUCCESS["context"] = context
+    _GROQ_LAST_SUCCESS["at"] = utcnow().isoformat()
 
 
-def _record_gemini_success(context: str):
-    _GEMINI_LAST_SUCCESS["context"] = context
-    _GEMINI_LAST_SUCCESS["at"] = utcnow().isoformat()
+def _groq_chat_completion(messages: List[dict]) -> Optional[str]:
+    """Low-level call to Groq's OpenAI-compatible chat completions endpoint.
+    Returns the assistant message text, or raises on any HTTP/parsing error
+    so the calling wrapper can log and record it."""
+    headers = {
+        "Authorization": f"Bearer {GROQ_API_KEY}",
+        "Content-Type": "application/json",
+    }
+    payload = {
+        "model": GROQ_MODEL,
+        "messages": messages,
+    }
+    resp = requests.post(GROQ_API_URL, headers=headers, json=payload, timeout=GROQ_TIMEOUT_SECONDS)
+    resp.raise_for_status()
+    data = resp.json()
+    return (data["choices"][0]["message"]["content"] or "").strip()
 
 
-def _call_gemini(prompt: str, context: str = "generic") -> Optional[str]:
-    """Single-turn Gemini call used by the advisor/insights/recommendations
-    endpoints. Returns None (never raises) if Gemini is unavailable or the
+def _call_groq(prompt: str, context: str = "generic") -> Optional[str]:
+    """Single-turn Groq call used by the advisor/insights/recommendations
+    endpoints. Returns None (never raises) if Groq is unavailable or the
     call fails — callers fall back to rule-based output — but every failure
     is logged and recorded for GET /ai/status."""
-    if not GEMINI_API_KEY:
-        logger.warning("GEMINI_API_KEY is not set — skipping Gemini call [%s].", context)
+    if not GROQ_API_KEY:
+        logger.warning("GROQ_API_KEY is not set — skipping Groq call [%s].", context)
         return None
     try:
-        client = _get_gemini_client()
-        resp = client.models.generate_content(model=GEMINI_MODEL, contents=prompt)
-        text = (getattr(resp, "text", None) or "").strip()
+        text = _groq_chat_completion([{"role": "user", "content": prompt}])
         if not text:
-            logger.warning("Gemini [%s] returned an empty response (prompt length %d).", context, len(prompt))
+            logger.warning("Groq [%s] returned an empty response (prompt length %d).", context, len(prompt))
             return None
-        _record_gemini_success(context)
+        _record_groq_success(context)
         return text
     except Exception as exc:
-        _record_gemini_error(context, exc)
+        _record_groq_error(context, exc)
         return None
 
 
-def _call_gemini_chat(system_context: str, history: List[dict], message: str) -> Optional[str]:
-    """Multi-turn Gemini call used by the AI Chat assistant. Sends the full
+def _call_groq_chat(system_context: str, history: List[dict], message: str) -> Optional[str]:
+    """Multi-turn Groq call used by the AI Chat assistant. Sends the full
     conversation history plus the current message, with the full system
-    snapshot injected as a system instruction so every reply is grounded in
+    snapshot injected as a system message so every reply is grounded in
     the user's live account data."""
-    if not GEMINI_API_KEY:
-        logger.warning("GEMINI_API_KEY is not set — skipping Gemini chat call.")
+    if not GROQ_API_KEY:
+        logger.warning("GROQ_API_KEY is not set — skipping Groq chat call.")
         return None
     try:
-        from google import genai
-        from google.genai import types
-
-        client = _get_gemini_client()
-        contents = []
+        messages = [{"role": "system", "content": system_context}]
         for h in history[-12:]:
-            role = "user" if h["role"] == "user" else "model"
-            contents.append(types.Content(role=role, parts=[types.Part(text=h["content"])]))
-        contents.append(types.Content(role="user", parts=[types.Part(text=message)]))
+            role = "user" if h["role"] == "user" else "assistant"
+            messages.append({"role": role, "content": h["content"]})
+        messages.append({"role": "user", "content": message})
 
-        resp = client.models.generate_content(
-            model=GEMINI_MODEL,
-            contents=contents,
-            config=types.GenerateContentConfig(system_instruction=system_context),
-        )
-        text = (getattr(resp, "text", None) or "").strip()
+        text = _groq_chat_completion(messages)
         if not text:
-            logger.warning("Gemini chat returned an empty response.")
+            logger.warning("Groq chat returned an empty response.")
             return None
-        _record_gemini_success("chat")
+        _record_groq_success("chat")
         return text
     except Exception as exc:
-        _record_gemini_error("chat", exc)
+        _record_groq_error("chat", exc)
         return None
 
 
@@ -2372,23 +2372,23 @@ def _parse_json_array(text: str) -> Optional[list]:
 @app.get("/ai/status")
 def ai_status(user: User = Depends(get_current_user)):
     """Diagnostic endpoint — check this first if AI features seem to be
-    silently falling back to rule-based output. Shows whether Gemini is
+    silently falling back to rule-based output. Shows whether Groq is
     configured, which model is targeted, and the last error/success."""
     return {
-        "gemini_configured": bool(GEMINI_API_KEY),
-        "gemini_model": GEMINI_MODEL,
-        "last_error": _GEMINI_LAST_ERROR,
-        "last_success": _GEMINI_LAST_SUCCESS,
+        "groq_configured": bool(GROQ_API_KEY),
+        "groq_model": GROQ_MODEL,
+        "last_error": _GROQ_LAST_ERROR,
+        "last_success": _GROQ_LAST_SUCCESS,
     }
 
 
 # ----------------------------------------------------------------------------
-# AI Chat — full-system-aware conversational advisor (Gemini only)
+# AI Chat — full-system-aware conversational advisor (Groq only)
 # ----------------------------------------------------------------------------
 
 def _rule_based_chat_reply(snapshot: dict, message: str) -> str:
     """A minimal offline fallback so the chat still responds usefully if
-    Gemini is not configured or a call fails."""
+    Groq is not configured or a call fails."""
     lower = message.lower()
     if "task" in lower or "todo" in lower:
         tasks = snapshot.get("all_open_tasks", [])
@@ -2410,9 +2410,9 @@ def _rule_based_chat_reply(snapshot: dict, message: str) -> str:
             return "You haven't added any businesses yet — add one and I can start comparing performance."
         lines = [f"{b['name']}: revenue {b['revenue_mtd']:,.0f}, expenses {b['expense_mtd']:,.0f}" for b in biz[:3]]
         return "This month so far — " + "; ".join(lines)
-    if not GEMINI_API_KEY:
+    if not GROQ_API_KEY:
         return (
-            "Gemini isn't configured for this account yet (no GEMINI_API_KEY set on the backend), "
+            "Groq isn't configured for this account yet (no GROQ_API_KEY set on the backend), "
             "so I can only give you basic offline answers right now. Ask about your tasks, goals, "
             "businesses, savings, or today's score."
         )
@@ -2431,8 +2431,8 @@ def ai_chat(body: ChatIn, user: User = Depends(get_current_user), db: Session = 
     balance, hotspot, task, journal note, notification, mission status and
     daily score. The full snapshot is rebuilt fresh from the database on
     every message, and the recent conversation history is sent alongside it,
-    so Gemini is always grounded in current data and stays context-aware
-    across turns. Gemini is the sole AI provider — if it's unavailable or a
+    so Groq is always grounded in current data and stays context-aware
+    across turns. Groq is the sole AI provider — if it's unavailable or a
     call fails, a lightweight rule-based reply is used instead so the chat
     never hard-fails."""
     message = body.message.strip()
@@ -2458,7 +2458,7 @@ def ai_chat(body: ChatIn, user: User = Depends(get_current_user), db: Session = 
         "CURRENT SYSTEM SNAPSHOT (JSON, live from the database):\n" + json.dumps(snapshot, default=str)
     )
 
-    reply = _call_gemini_chat(system_context, history, message)
+    reply = _call_groq_chat(system_context, history, message)
     if not reply:
         reply = _rule_based_chat_reply(snapshot, message)
 
