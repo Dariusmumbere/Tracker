@@ -62,6 +62,122 @@ MOTIVATION_QUOTES = [
 ]
 
 # ----------------------------------------------------------------------------
+# Currency helper — every AI prompt in this file embeds an explicit
+# instruction about which currency the numbers are in. This exists because
+# the model otherwise defaults to assuming USD / "$" even when every figure
+# in the account snapshot is denominated in UGX (or whichever currency the
+# user picked at registration). Never remove this from a prompt.
+# ----------------------------------------------------------------------------
+
+def _currency_instruction(user: "User") -> str:
+    return (
+        f"IMPORTANT: every monetary amount in the data below, and in your reply, is denominated "
+        f"in {user.currency} ({'Ugandan Shillings' if user.currency == 'UGX' else user.currency}). "
+        f"Never use a dollar sign ($), never say 'dollars', and never convert the numbers to another "
+        f"currency — write amounts as plain numbers followed by '{user.currency}' (e.g. 250,000 {user.currency})."
+    )
+
+
+# ----------------------------------------------------------------------------
+# Curated fallback business ideas — used for the daily Business
+# Recommendation tab when Groq is unavailable, or as a same-day retry seed.
+# All figures are UGX, tuned for realistic small-capital Ugandan ventures.
+# ----------------------------------------------------------------------------
+
+UGANDA_BUSINESS_IDEAS = [
+    {
+        "name": "Broiler Poultry Farming", "category": "Agriculture",
+        "summary": "Raising broiler chickens for meat is one of Uganda's fastest-turnaround agribusinesses, with a 6-8 week cycle from chick to market.",
+        "startup_cost": 1200000, "monthly_profit": 500000,
+        "plan": "1. Start with 100-200 day-old broiler chicks from a certified hatchery.\n2. Build or rent a simple, well-ventilated poultry structure.\n3. Budget for feed, vaccines and clean water for the full 6-8 week cycle.\n4. Vaccinate on schedule and monitor for disease daily.\n5. Line up buyers (local markets, restaurants, hotels) before the birds mature.\n6. Sell at 6-8 weeks and immediately restock with a new batch to keep cash flowing.",
+    },
+    {
+        "name": "Piggery (Pig Farming)", "category": "Agriculture",
+        "summary": "Pigs convert feed to meat efficiently and have strong, steady demand in both rural and urban Ugandan markets.",
+        "startup_cost": 2000000, "monthly_profit": 450000,
+        "plan": "1. Construct a simple concrete-floor sty with good drainage.\n2. Buy 2-4 weaners (young pigs) from a reputable farm.\n3. Source affordable feed — combine commercial feed with local supplements like maize bran.\n4. Deworm and vaccinate on a fixed schedule.\n5. Maintain strict hygiene to prevent disease outbreaks.\n6. Sell live or slaughtered at 5-6 months to butcheries and local markets.",
+    },
+    {
+        "name": "Mobile Money & Airtime Kiosk", "category": "Finance & Retail",
+        "summary": "A mobile money and airtime booth serves a constant daily need and generates commission income with very low overhead.",
+        "startup_cost": 600000, "monthly_profit": 350000,
+        "plan": "1. Register as an agent with MTN Mobile Money and/or Airtel Money.\n2. Secure a small, visible kiosk in a high-foot-traffic spot (trading centre, taxi stage, market).\n3. Keep a healthy float balance of both cash and e-float.\n4. Add a phone accessories/airtime scratch-card corner to diversify income.\n5. Track daily transaction commissions carefully.\n6. Reinvest profits into a larger float to serve bigger transactions.",
+    },
+    {
+        "name": "Boda-Boda (Motorcycle) Transport", "category": "Transport",
+        "summary": "A well-maintained motorcycle taxi remains one of the most reliable daily-income businesses across Uganda's towns and trading centres.",
+        "startup_cost": 4500000, "monthly_profit": 400000,
+        "plan": "1. Buy a durable, fuel-efficient motorcycle (new or good used condition).\n2. Register with a local boda-boda stage association for security and referrals.\n3. Get a rider's permit, insurance, and reflective gear.\n4. Track fuel and maintenance costs daily to know your true net profit.\n5. Consider joining a ride-hailing app (e.g. SafeBoda) for extra bookings.\n6. Service the bike on schedule to avoid costly breakdowns.",
+    },
+    {
+        "name": "Charcoal Briquette Production", "category": "Manufacturing / Green",
+        "summary": "Turning agricultural waste into charcoal briquettes taps rising demand for cheaper, cleaner cooking fuel in urban areas.",
+        "startup_cost": 900000, "monthly_profit": 300000,
+        "plan": "1. Collect cheap or free biomass waste (sawdust, coffee husks, maize cobs).\n2. Carbonize the waste and bind it into briquettes using a simple press.\n3. Dry the briquettes fully before packaging to ensure a clean burn.\n4. Package in small affordable bags for household budgets.\n5. Sell through local shops, markets, and directly to households.\n6. Reinvest early profit into a better press to scale output.",
+    },
+    {
+        "name": "Tailoring & Fashion Design", "category": "Manufacturing",
+        "summary": "Custom tailoring for school uniforms, workwear and fashion pieces has steady, repeat demand in every Ugandan town.",
+        "startup_cost": 800000, "monthly_profit": 350000,
+        "plan": "1. Buy a reliable manual or electric sewing machine.\n2. Rent a small, visible workspace or start from home to save costs.\n3. Build a portfolio with a few sample garments to attract clients.\n4. Target a niche first — school uniforms, office wear, or trendy fashion.\n5. Offer fast turnaround and consistent quality to build repeat customers.\n6. Add a second machine and an apprentice once orders grow steady.",
+    },
+    {
+        "name": "Fish Farming (Tilapia / Catfish)", "category": "Agriculture",
+        "summary": "Pond or cage fish farming taps strong local demand for tilapia and catfish, with a manageable production cycle.",
+        "startup_cost": 2500000, "monthly_profit": 500000,
+        "plan": "1. Dig or line a pond, or set up cages if near a lake/reservoir.\n2. Stock quality fingerlings from a certified hatchery.\n3. Feed consistently on a fixed schedule with quality fish feed.\n4. Monitor water quality regularly to prevent fish loss.\n5. Line up buyers — restaurants, markets, fish mongers — before harvest.\n6. Harvest at 6-8 months and immediately restock the next cycle.",
+    },
+    {
+        "name": "Liquid Soap & Detergent Making", "category": "Manufacturing",
+        "summary": "Producing liquid soap and detergents from locally available raw materials is low-cost to start and has daily household demand.",
+        "startup_cost": 500000, "monthly_profit": 350000,
+        "plan": "1. Learn the basic formulation (many short local trainings exist) or buy a starter kit.\n2. Source raw chemicals (SLES, caustic soda, salt, fragrance) in bulk to cut costs.\n3. Produce in small consistent batches to control quality.\n4. Package in reused or cheap bottles with a simple branded label.\n5. Sell to shops, salons, and households on a wholesale-and-retail mix.\n6. Reinvest into bulk raw materials as orders grow to improve margins.",
+    },
+    {
+        "name": "Motorcycle Spare Parts Shop", "category": "Retail",
+        "summary": "With boda-bodas everywhere, a well-stocked spare-parts shop near a busy stage or garage cluster sees constant repeat business.",
+        "startup_cost": 3000000, "monthly_profit": 500000,
+        "plan": "1. Study which parts sell fastest at nearby garages (brake pads, chains, bulbs, filters).\n2. Rent a small shop close to a boda stage or garage cluster.\n3. Start with fast-moving, low-cost parts before stocking expensive items.\n4. Build relationships with local mechanics for steady referrals.\n5. Track stock carefully to avoid running out of top sellers.\n6. Reinvest profit into widening the product range gradually.",
+    },
+    {
+        "name": "Fruit & Vegetable Wholesale-to-Retail Trade", "category": "Agri-Trade",
+        "summary": "Buying fresh produce cheaply from rural farmers or wholesale markets and reselling in town captures a healthy daily margin.",
+        "startup_cost": 400000, "monthly_profit": 300000,
+        "plan": "1. Identify a reliable low-cost source — farm gate or a large wholesale market.\n2. Buy early morning to get the freshest stock at the best price.\n3. Secure a stall or mobile cart in a high-traffic market or roadside spot.\n4. Sell same-day where possible to minimise spoilage losses.\n5. Track which produce sells fastest and adjust buying accordingly.\n6. Reinvest profit into buying larger volumes for better wholesale rates.",
+    },
+    {
+        "name": "Event Equipment Rental (Chairs, Tents, Sound)", "category": "Services",
+        "summary": "Weddings, church events and functions are constant across Uganda — renting out chairs, tents and PA systems is high-margin.",
+        "startup_cost": 3500000, "monthly_profit": 450000,
+        "plan": "1. Start small — plastic chairs, a basic tent, and a simple PA system.\n2. Store equipment somewhere secure and easy to load/unload.\n3. Advertise locally through churches, event planners, and word of mouth.\n4. Offer a delivery-and-setup service to stand out from competitors.\n5. Track equipment carefully to avoid losses from events.\n6. Reinvest profit into more chairs/tents to handle bigger events.",
+    },
+    {
+        "name": "Water Refilling / Bottling Business", "category": "Manufacturing",
+        "summary": "Purified drinking water refill stations serve steady daily demand from households, shops, and offices.",
+        "startup_cost": 3500000, "monthly_profit": 500000,
+        "plan": "1. Secure a clean water source and a basic purification/filtration setup.\n2. Get the required local health/water authority approvals.\n3. Start with a refill-your-own-bottle model to keep packaging costs low.\n4. Sell to nearby households, shops, offices and events.\n5. Maintain strict hygiene and regular filter servicing.\n6. Add bottling and a delivery service once demand grows.",
+    },
+]
+
+
+def _parse_json_object(text: Optional[str]) -> Optional[dict]:
+    if not text:
+        return None
+    cleaned = text.strip()
+    if cleaned.startswith("```"):
+        cleaned = cleaned.strip("`")
+        if cleaned.lower().startswith("json"):
+            cleaned = cleaned[4:]
+    try:
+        parsed = json.loads(cleaned)
+        if isinstance(parsed, dict):
+            return parsed
+    except Exception:
+        pass
+    return None
+
+
+# ----------------------------------------------------------------------------
 # Database setup
 # ----------------------------------------------------------------------------
 
@@ -110,6 +226,7 @@ class User(Base):
     todos = relationship("Todo", back_populates="owner", cascade="all, delete-orphan")
     daily_scores = relationship("DailyScore", back_populates="owner", cascade="all, delete-orphan")
     chat_messages = relationship("ChatMessage", back_populates="owner", cascade="all, delete-orphan")
+    business_recommendations = relationship("BusinessRecommendation", back_populates="owner", cascade="all, delete-orphan")
 
 
 class Business(Base):
@@ -145,6 +262,7 @@ class Savings(Base):
     __tablename__ = "savings"
     id = Column(Integer, primary_key=True, index=True)
     user_id = Column(Integer, ForeignKey("users.id"), nullable=False, index=True)
+    business_id = Column(Integer, ForeignKey("businesses.id"), nullable=True, index=True)
     date = Column(Date, default=lambda: date.today())
     profit_amount = Column(Float, nullable=False)
     percentage = Column(Float, nullable=False)
@@ -278,7 +396,11 @@ class ExecutionScore(Base):
 
 
 class Todo(Base):
-    """A single task. Tasks are the atomic unit the daily score is graded on."""
+    """A single task. Tasks are the atomic unit the daily score is graded on.
+    If `recurring` is true, this task acts as a template: a fresh instance
+    (same title/notes/priority/business) is auto-created for each new day
+    it doesn't already have one, so daily habits don't have to be re-typed
+    every morning."""
     __tablename__ = "todos"
     id = Column(Integer, primary_key=True, index=True)
     user_id = Column(Integer, ForeignKey("users.id"), nullable=False, index=True)
@@ -289,6 +411,7 @@ class Todo(Base):
     due_date = Column(Date, default=lambda: date.today(), index=True)
     status = Column(String, default="pending")  # pending | in_progress | completed | abandoned
     ai_feedback = Column(String, default="")
+    recurring = Column(Boolean, default=False)
     created_at = Column(DateTime, default=utcnow)
     completed_at = Column(DateTime, nullable=True)
 
@@ -322,6 +445,26 @@ class ChatMessage(Base):
     created_at = Column(DateTime, default=utcnow)
 
     owner = relationship("User", back_populates="chat_messages")
+
+
+class BusinessRecommendation(Base):
+    """One AI-generated (or curated-fallback) profitable-business suggestion
+    per user per day, kept permanently as a running record of ideas
+    offered to this user over time."""
+    __tablename__ = "business_recommendations"
+    id = Column(Integer, primary_key=True, index=True)
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=False, index=True)
+    date = Column(Date, default=lambda: date.today(), index=True)
+    business_name = Column(String, nullable=False)
+    category = Column(String, default="General")
+    summary = Column(String, default="")
+    plan = Column(String, default="")
+    estimated_startup_cost = Column(Float, default=0)
+    estimated_monthly_profit = Column(Float, default=0)
+    source = Column(String, default="rule_based")  # groq | rule_based
+    created_at = Column(DateTime, default=utcnow)
+
+    owner = relationship("User", back_populates="business_recommendations")
 
 
 Base.metadata.create_all(bind=engine)
@@ -385,7 +528,7 @@ def get_current_user(
 
 
 # ----------------------------------------------------------------------------
-# Pydantic schemas — auth / core entities (unchanged from original)
+# Pydantic schemas — auth / core entities
 # ----------------------------------------------------------------------------
 
 class RegisterIn(BaseModel):
@@ -499,6 +642,7 @@ class TransactionOut(BaseModel):
 
 
 class SavingsIn(BaseModel):
+    business_id: int
     profit_amount: float
     percentage: float
     note: str = ""
@@ -507,6 +651,8 @@ class SavingsIn(BaseModel):
 
 class SavingsOut(BaseModel):
     id: int
+    business_id: Optional[int]
+    business_name: Optional[str] = None
     date: date
     profit_amount: float
     percentage: float
@@ -517,6 +663,14 @@ class SavingsOut(BaseModel):
 
     class Config:
         from_attributes = True
+
+
+class BusinessBalanceOut(BaseModel):
+    business_id: int
+    business_name: str
+    profit_to_date: float
+    already_saved: float
+    available_to_save: float
 
 
 class HotspotIn(BaseModel):
@@ -704,7 +858,7 @@ class ExecutionScoreOut(BaseModel):
 
 
 # ----------------------------------------------------------------------------
-# Pydantic schemas — Todos / Daily Score / Chat
+# Pydantic schemas — Todos / Daily Score / Chat / Business Recommendations
 # ----------------------------------------------------------------------------
 
 class TodoIn(BaseModel):
@@ -713,6 +867,7 @@ class TodoIn(BaseModel):
     priority: str = "medium"
     business_id: Optional[int] = None
     due_date: Optional[date] = None
+    recurring: bool = False
 
     @field_validator("priority")
     @classmethod
@@ -727,6 +882,7 @@ class TodoUpdateIn(BaseModel):
     business_id: Optional[int] = None
     due_date: Optional[date] = None
     status: Optional[str] = None
+    recurring: Optional[bool] = None
 
     @field_validator("priority")
     @classmethod
@@ -752,6 +908,7 @@ class TodoOut(BaseModel):
     due_date: Optional[date]
     status: str
     ai_feedback: str
+    recurring: bool
     created_at: dt
     completed_at: Optional[dt]
 
@@ -785,11 +942,26 @@ class ChatHistoryOut(BaseModel):
         from_attributes = True
 
 
+class BusinessRecommendationOut(BaseModel):
+    id: int
+    date: date
+    business_name: str
+    category: str
+    summary: str
+    plan: str
+    estimated_startup_cost: float
+    estimated_monthly_profit: float
+    source: str
+
+    class Config:
+        from_attributes = True
+
+
 # ----------------------------------------------------------------------------
 # App
 # ----------------------------------------------------------------------------
 
-app = FastAPI(title="Business Growth Tracker AI API", version="2.2.0")
+app = FastAPI(title="Business Growth Tracker AI API", version="2.3.0")
 
 app.add_middleware(
     CORSMiddleware,
@@ -969,31 +1141,92 @@ def delete_transaction(tx_id: int, user: User = Depends(get_current_user), db: S
 
 
 # ----------------------------------------------------------------------------
-# Savings
+# Savings — now tied to a specific business. You cannot save more than that
+# business's actual profit-to-date minus what has already been saved from
+# it, so the savings balance can never outrun real cash the business has
+# generated.
 # ----------------------------------------------------------------------------
+
+def _business_available_for_savings(db: Session, user: User, business_id: int):
+    """Returns (available_to_save, profit_to_date, already_saved) for a
+    single business: profit_to_date is lifetime revenue minus expenses for
+    that business; already_saved is the sum of everything previously saved
+    out of that business; available_to_save is the remainder that can still
+    be moved into savings."""
+    inception = date(2000, 1, 1)
+    today = date.today()
+    revenue = _sum_business_tx(db, user, business_id, "revenue", inception, today)
+    expense = _sum_business_tx(db, user, business_id, "expense", inception, today)
+    profit_to_date = revenue - expense
+    already_saved = float(db.query(func.coalesce(func.sum(Savings.amount_saved), 0.0)).filter(
+        Savings.user_id == user.id, Savings.business_id == business_id
+    ).scalar() or 0.0)
+    available = max(0.0, profit_to_date - already_saved)
+    return available, profit_to_date, already_saved
+
+
+@app.get("/businesses/{biz_id}/balance", response_model=BusinessBalanceOut)
+def business_balance(biz_id: int, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    biz = _get_owned_business(db, user, biz_id)
+    available, profit, already_saved = _business_available_for_savings(db, user, biz_id)
+    return BusinessBalanceOut(
+        business_id=biz_id, business_name=biz.name, profit_to_date=profit,
+        already_saved=already_saved, available_to_save=available,
+    )
+
 
 @app.get("/savings", response_model=List[SavingsOut])
 def list_savings(user: User = Depends(get_current_user), db: Session = Depends(get_db)):
-    return db.query(Savings).filter(Savings.user_id == user.id).order_by(Savings.date.asc(), Savings.id.asc()).all()
+    rows = db.query(Savings).filter(Savings.user_id == user.id).order_by(Savings.date.asc(), Savings.id.asc()).all()
+    biz_map = {b.id: b.name for b in db.query(Business).filter(Business.user_id == user.id).all()}
+    out = []
+    for r in rows:
+        out.append(SavingsOut(
+            id=r.id, business_id=r.business_id, business_name=biz_map.get(r.business_id, "—"),
+            date=r.date, profit_amount=r.profit_amount, percentage=r.percentage,
+            amount_saved=r.amount_saved, remaining_cash=r.remaining_cash,
+            balance_after=r.balance_after, note=r.note,
+        ))
+    return out
 
 
 @app.post("/savings", response_model=SavingsOut)
 def create_savings(body: SavingsIn, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    biz = _get_owned_business(db, user, body.business_id)
+    if body.profit_amount <= 0:
+        raise HTTPException(status_code=400, detail="Profit amount must be greater than zero.")
+    available, profit_to_date, already_saved = _business_available_for_savings(db, user, body.business_id)
+    if body.profit_amount > available + 0.01:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"'{biz.name}' only has {available:,.0f} {user.currency} available to save "
+                f"(profit to date: {profit_to_date:,.0f}, already saved: {already_saved:,.0f}). "
+                f"You cannot save more than a business actually has."
+            ),
+        )
     pct = max(0.0, min(100.0, body.percentage))
     amount_saved = body.profit_amount * (pct / 100.0)
     remaining_cash = body.profit_amount - amount_saved
     prev_balance = db.query(func.coalesce(func.sum(Savings.amount_saved), 0.0)).filter(Savings.user_id == user.id).scalar()
     balance_after = float(prev_balance) + amount_saved
     rec = Savings(
-        user_id=user.id, date=body.date or date.today(), profit_amount=body.profit_amount,
-        percentage=pct, amount_saved=amount_saved, remaining_cash=remaining_cash,
-        balance_after=balance_after, note=body.note or "",
+        user_id=user.id, business_id=body.business_id, date=body.date or date.today(),
+        profit_amount=body.profit_amount, percentage=pct, amount_saved=amount_saved,
+        remaining_cash=remaining_cash, balance_after=balance_after, note=body.note or "",
     )
     db.add(rec)
-    db.add(Notification(user_id=user.id, kind="success", message=f"Saved {amount_saved:,.0f} — balance now {balance_after:,.0f}."))
+    db.add(Notification(
+        user_id=user.id, kind="success",
+        message=f"Saved {amount_saved:,.0f} {user.currency} from {biz.name} — total balance now {balance_after:,.0f} {user.currency}.",
+    ))
     db.commit()
     db.refresh(rec)
-    return rec
+    return SavingsOut(
+        id=rec.id, business_id=rec.business_id, business_name=biz.name, date=rec.date,
+        profit_amount=rec.profit_amount, percentage=rec.percentage, amount_saved=rec.amount_saved,
+        remaining_cash=rec.remaining_cash, balance_after=rec.balance_after, note=rec.note,
+    )
 
 
 # ----------------------------------------------------------------------------
@@ -1029,8 +1262,6 @@ def hotspot_projection(user: User = Depends(get_current_user), db: Session = Dep
     growth_per_half_year = 0.15
     completion_percent = round(min(100.0, (current / target * 100) if target else 0), 1)
 
-    # Days until affordable next hotspot, estimated from average monthly net profit
-    # vs the average cost of an existing hotspot (a proxy "next hotspot budget").
     days_until_target = None
     hotspots = db.query(Hotspot).filter(Hotspot.user_id == user.id).all()
     if hotspots and current < target:
@@ -1038,7 +1269,7 @@ def hotspot_projection(user: User = Depends(get_current_user), db: Session = Dep
         today = date.today()
         month_start = today.replace(day=1)
         monthly_profit = _tx_sum(db, user, "revenue", month_start, today) - _tx_sum(db, user, "expense", month_start, today)
-        daily_savings_rate = max(monthly_profit, 0) / 30 * 0.3  # assume 30% of profit reinvested
+        daily_savings_rate = max(monthly_profit, 0) / 30 * 0.3
         if daily_savings_rate > 0 and avg_cost > 0:
             days_until_target = int(round(avg_cost / daily_savings_rate))
 
@@ -1151,20 +1382,9 @@ def delete_asset(asset_id: int, user: User = Depends(get_current_user), db: Sess
 
 # ----------------------------------------------------------------------------
 # Goals — with estimated completion date + status
-#
-# NOTE: update_goal / delete_goal below both filter strictly on
-# (Goal.id == goal_id, Goal.user_id == user.id). If a goal fails to update
-# or delete from the UI, it is almost always because the goal_id being sent
-# no longer matches a row owned by the logged-in user (stale client-side
-# cache) — the routes themselves accept partial updates and always commit.
-# Both endpoints below now also return a clear 404 message and the update
-# endpoint accepts every editable field, including status transitions.
 # ----------------------------------------------------------------------------
 
 def _estimate_goal_completion(db: Session, user: User, g: Goal) -> Optional[date]:
-    """Rough estimate based on the account's recent average monthly net profit,
-    assuming a portion of it flows toward open goals. This is a heuristic,
-    not a guarantee — it gives the user a directional target date."""
     if g.status != "active" or g.target_amount <= 0:
         return None
     remaining = g.target_amount - g.current_amount
@@ -1174,11 +1394,11 @@ def _estimate_goal_completion(db: Session, user: User, g: Goal) -> Optional[date
     three_months_ago = today - timedelta(days=90)
     profit_90d = _tx_sum(db, user, "revenue", three_months_ago, today) - _tx_sum(db, user, "expense", three_months_ago, today)
     monthly_profit = profit_90d / 3
-    monthly_contribution = max(monthly_profit, 0) * 0.25  # assume 25% of profit toward goals
+    monthly_contribution = max(monthly_profit, 0) * 0.25
     if monthly_contribution <= 0:
         return None
     months_needed = remaining / monthly_contribution
-    if months_needed > 600:  # cap absurd estimates (50 years)
+    if months_needed > 600:
         return None
     return today + timedelta(days=int(round(months_needed * 30.44)))
 
@@ -1239,8 +1459,6 @@ def update_goal(goal_id: int, body: GoalUpdateIn, user: User = Depends(get_curre
         g.current_amount = max(0.0, body.current_amount)
     if body.status is not None:
         g.status = body.status
-    # Auto-complete when the target is reached, unless the user explicitly
-    # set a different status in this same request.
     if g.target_amount and g.current_amount >= g.target_amount and g.status == "active" and body.status is None:
         g.status = "completed"
         db.add(Notification(user_id=user.id, kind="success", message=f"Goal '{g.name}' reached! \U0001F389"))
@@ -1403,15 +1621,46 @@ def delete_milestone(milestone_id: int, user: User = Depends(get_current_user), 
 
 
 # ----------------------------------------------------------------------------
-# Todos — tasks the daily score is graded against
+# Todos — tasks the daily score is graded against. Recurring tasks act as a
+# template: each day a fresh instance is auto-created if one for today
+# doesn't already exist, so the same daily habits don't have to be re-typed
+# every morning and every day still gets its own row in the historical record.
 # ----------------------------------------------------------------------------
 
 def _todo_out(t: Todo) -> TodoOut:
     return TodoOut(
         id=t.id, title=t.title, notes=t.notes, priority=t.priority, business_id=t.business_id,
-        due_date=t.due_date, status=t.status, ai_feedback=t.ai_feedback or "",
+        due_date=t.due_date, status=t.status, ai_feedback=t.ai_feedback or "", recurring=bool(t.recurring),
         created_at=t.created_at, completed_at=t.completed_at,
     )
+
+
+def _refresh_recurring_todos(db: Session, user: User):
+    """Ensures every distinct recurring task template has a fresh instance
+    for today. A 'template' is identified by its title (case-insensitive) —
+    the earliest recurring row with that title. This keeps daily habits
+    (e.g. 'Record today's transactions', 'Check hotspot uptime') showing up
+    automatically each day instead of vanishing once the previous day's copy
+    is completed."""
+    today = date.today()
+    recurring_rows = db.query(Todo).filter(Todo.user_id == user.id, Todo.recurring == True).order_by(Todo.created_at.asc()).all()  # noqa: E712
+    seen = {}
+    for t in recurring_rows:
+        key = t.title.strip().lower()
+        if key not in seen:
+            seen[key] = t
+    for key, template in seen.items():
+        exists_today = db.query(Todo).filter(
+            Todo.user_id == user.id, Todo.due_date == today, Todo.recurring == True,  # noqa: E712
+            func.lower(Todo.title) == key,
+        ).first()
+        if not exists_today:
+            db.add(Todo(
+                user_id=user.id, title=template.title, notes=template.notes, priority=template.priority,
+                business_id=template.business_id, due_date=today, recurring=True, status="pending",
+            ))
+    if seen:
+        db.commit()
 
 
 @app.get("/todos", response_model=List[TodoOut])
@@ -1423,6 +1672,10 @@ def list_todos(
     user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
+    # Make sure today's recurring instances exist before we read anything,
+    # so daily/recurring tasks are never missing from "today" or "all".
+    _refresh_recurring_todos(db, user)
+
     q = db.query(Todo).filter(Todo.user_id == user.id)
     if due_date:
         q = q.filter(Todo.due_date == due_date)
@@ -1435,14 +1688,12 @@ def list_todos(
 
 
 def _generate_todo_feedback(db: Session, user: User, t: Todo) -> str:
-    """Short, immediate AI-style feedback on a single newly-created task,
-    using Groq (with full account context) if available, else a
-    rule-based heuristic."""
     if GROQ_API_KEY:
         snapshot = _build_full_system_snapshot(db, user, light=False)
         prompt = (
-            "You are a business task coach. A user just added this task to their todo list: "
-            + json.dumps({"title": t.title, "notes": t.notes, "priority": t.priority, "due_date": t.due_date.isoformat() if t.due_date else None})
+            _currency_instruction(user) + " You are a business task coach. A user just added this task "
+            "to their todo list: "
+            + json.dumps({"title": t.title, "notes": t.notes, "priority": t.priority, "due_date": t.due_date.isoformat() if t.due_date else None, "recurring": bool(t.recurring)})
             + ". Here is the user's full current business/account data for context: "
             + json.dumps(snapshot, default=str)
             + ". Respond with ONE short sentence (max 25 words) of direct, useful feedback or "
@@ -1451,7 +1702,6 @@ def _generate_todo_feedback(db: Session, user: User, t: Todo) -> str:
         text = _call_groq(prompt, context="todo_feedback")
         if text:
             return text.strip().strip('"')
-    # Rule-based fallback
     title_lower = t.title.lower()
     if t.priority == "high":
         return "Marked high priority — tackle this first today before anything else slips."
@@ -1468,7 +1718,7 @@ def create_todo(body: TodoIn, user: User = Depends(get_current_user), db: Sessio
         _get_owned_business(db, user, body.business_id)
     t = Todo(
         user_id=user.id, title=body.title.strip(), notes=body.notes or "", priority=body.priority,
-        business_id=body.business_id, due_date=body.due_date or date.today(),
+        business_id=body.business_id, due_date=body.due_date or date.today(), recurring=body.recurring,
     )
     db.add(t)
     db.commit()
@@ -1499,6 +1749,8 @@ def update_todo(todo_id: int, body: TodoUpdateIn, user: User = Depends(get_curre
         t.business_id = body.business_id
     if body.due_date is not None:
         t.due_date = body.due_date
+    if body.recurring is not None:
+        t.recurring = body.recurring
     if body.status is not None:
         was_completed = t.status == "completed"
         t.status = body.status
@@ -1523,7 +1775,6 @@ def delete_todo(todo_id: int, user: User = Depends(get_current_user), db: Sessio
 
 @app.get("/ai/todo-feedback")
 def ai_todo_feedback(user: User = Depends(get_current_user), db: Session = Depends(get_db)):
-    """Feedback and advice across the user's current open task list."""
     today = date.today()
     open_todos = db.query(Todo).filter(
         Todo.user_id == user.id, Todo.status.in_(["pending", "in_progress"]), Todo.due_date <= today
@@ -1536,16 +1787,16 @@ def ai_todo_feedback(user: User = Depends(get_current_user), db: Session = Depen
         snapshot = _build_full_system_snapshot(db, user, light=False)
         payload = {
             "open_tasks": [
-                {"title": t.title, "priority": t.priority, "due_date": t.due_date.isoformat(), "status": t.status}
+                {"title": t.title, "priority": t.priority, "due_date": t.due_date.isoformat(), "status": t.status, "recurring": bool(t.recurring)}
                 for t in open_todos
             ],
             "full_account_context": snapshot,
         }
         prompt = (
-            "You are a task-management coach for a busy entrepreneur. Given their open task list "
-            "and their full current business/account data, respond ONLY with a JSON array of 3-5 "
-            "short, specific feedback/advice strings about how they're managing their tasks — flag "
-            "overdue items, too many high-priority items, tasks with no clear next step, or good "
+            _currency_instruction(user) + " You are a task-management coach for a busy entrepreneur. Given "
+            "their open task list and their full current business/account data, respond ONLY with a JSON "
+            "array of 3-5 short, specific feedback/advice strings about how they're managing their tasks — "
+            "flag overdue items, too many high-priority items, tasks with no clear next step, or good "
             "patterns to keep. No preamble, no markdown fences.\n\n" + json.dumps(payload, default=str)
         )
         text = _call_groq(prompt, context="todo_list_feedback")
@@ -1553,7 +1804,6 @@ def ai_todo_feedback(user: User = Depends(get_current_user), db: Session = Depen
         if parsed and all(isinstance(x, str) for x in parsed):
             return {"feedback": parsed}
 
-    # Rule-based fallback
     fb = []
     overdue = [t for t in open_todos if t.due_date < today]
     if overdue:
@@ -1569,8 +1819,7 @@ def ai_todo_feedback(user: User = Depends(get_current_user), db: Session = Depen
 
 
 # ----------------------------------------------------------------------------
-# Daily Execution Score (auto-computed from real data, including task
-# completion) — no manual checklist required.
+# Daily Execution Score
 # ----------------------------------------------------------------------------
 
 def _compute_execution_score(db: Session, user: User, on_date: date):
@@ -1602,7 +1851,8 @@ def _compute_execution_score(db: Session, user: User, on_date: date):
     breakdown["businesses_updated"] = f"{engaged}/{len(active_businesses)}" if active_businesses else "0/0"
     business_engagement_ratio = (engaged / len(active_businesses)) if active_businesses else 1.0
 
-    # Task completion for the day — tasks due today only.
+    if on_date == date.today():
+        _refresh_recurring_todos(db, user)
     tasks_due_today = db.query(Todo).filter(Todo.user_id == user.id, Todo.due_date == today).all()
     tasks_total = len(tasks_due_today)
     tasks_completed = len([t for t in tasks_due_today if t.status == "completed"])
@@ -1636,7 +1886,7 @@ def _compute_execution_score(db: Session, user: User, on_date: date):
     if not breakdown["expenses_recorded"]:
         suggestions.append("Record any expenses from today so tomorrow's profit numbers stay accurate.")
     if not breakdown["savings_updated"]:
-        suggestions.append("Set aside a percentage of this week's profit into savings.")
+        suggestions.append("Set aside a percentage of this week's profit into savings from whichever business earned it.")
     if not breakdown["journal_completed"]:
         suggestions.append("Write a quick journal entry — what you did, learned, and will improve.")
     if business_engagement_ratio < 1.0:
@@ -1659,8 +1909,6 @@ def execution_score_today(user: User = Depends(get_current_user), db: Session = 
     else:
         db.add(ExecutionScore(user_id=user.id, date=today, score=score, breakdown_json=json.dumps(breakdown)))
 
-    # Persist the permanent daily-score record too, so history survives even
-    # if ExecutionScore rows are ever pruned.
     existing_daily = db.query(DailyScore).filter(DailyScore.user_id == user.id, DailyScore.date == today).first()
     if existing_daily:
         existing_daily.score = score
@@ -1686,7 +1934,6 @@ def execution_score_history(days: int = 30, user: User = Depends(get_current_use
 
 @app.get("/daily-scores", response_model=List[DailyScoreOut])
 def list_daily_scores(days: int = Query(60, le=1000), user: User = Depends(get_current_user), db: Session = Depends(get_db)):
-    """Permanent historical record of daily scores and task completion."""
     start = date.today() - timedelta(days=days - 1)
     rows = db.query(DailyScore).filter(DailyScore.user_id == user.id, DailyScore.date >= start).order_by(DailyScore.date.desc()).all()
     out = []
@@ -1747,11 +1994,15 @@ def business_empire(user: User = Depends(get_current_user), db: Session = Depend
             Transaction.user_id == user.id, Transaction.business_id == b.id).scalar()
         days_inactive = (today - last_activity).days if last_activity else None
 
+        already_saved = float(db.query(func.coalesce(func.sum(Savings.amount_saved), 0.0)).filter(
+            Savings.user_id == user.id, Savings.business_id == b.id).scalar() or 0.0)
+
         out.append({
             "id": b.id, "name": b.name, "category": b.category, "status": b.status,
             "revenue": revenue_all, "expenses": expense_all, "profit": profit_all,
             "growth_percent": growth, "investment": total_invested, "roi_percent": roi,
-            "days_inactive": days_inactive,
+            "days_inactive": days_inactive, "already_saved": already_saved,
+            "available_to_save": max(0.0, profit_all - already_saved),
         })
     out.sort(key=lambda x: x["profit"], reverse=True)
     return out
@@ -1806,38 +2057,31 @@ def _recent_notification_exists(db, user, fragment: str, within_days: int = 1) -
 
 @app.post("/notifications/check")
 def run_smart_notifications(user: User = Depends(get_current_user), db: Session = Depends(get_db)):
-    """Runs all smart-notification rules and creates any new notifications.
-    Safe to call on every login / dashboard load — de-duplicates same-day alerts."""
     created = []
     today = date.today()
 
-    # Daily entry missing (no transactions logged today, and it's afternoon-or-later in spirit)
     if _tx_sum(db, user, "revenue", today, today) == 0 and _tx_sum(db, user, "expense", today, today) == 0:
         if not _recent_notification_exists(db, user, "haven't logged anything today"):
             msg = "You haven't logged anything today — record at least one transaction before the day ends."
             db.add(Notification(user_id=user.id, kind="warning", message=msg))
             created.append(msg)
 
-    # Tasks due today not yet completed, flagged in the afternoon-equivalent check
     open_tasks_today = db.query(Todo).filter(Todo.user_id == user.id, Todo.due_date == today, Todo.status.in_(["pending", "in_progress"])).count()
     if open_tasks_today > 0 and not _recent_notification_exists(db, user, "task(s) due today still open"):
         msg = f"You have {open_tasks_today} task(s) due today still open — check your Todo list."
         db.add(Notification(user_id=user.id, kind="warning", message=msg))
         created.append(msg)
 
-    # Weekly review due (Sunday)
     if today.weekday() == 6 and not _recent_notification_exists(db, user, "Weekly review is ready"):
         msg = "Weekly review is ready — check your Reports page for this week's summary."
         db.add(Notification(user_id=user.id, kind="info", message=msg))
         created.append(msg)
 
-    # Monthly review due (1st of month)
     if today.day == 1 and not _recent_notification_exists(db, user, "Monthly review is ready"):
         msg = "Monthly review is ready — see how last month compared."
         db.add(Notification(user_id=user.id, kind="info", message=msg))
         created.append(msg)
 
-    # Business inactive (no transactions in 14+ days)
     businesses = db.query(Business).filter(Business.user_id == user.id, Business.status == "active").all()
     for b in businesses:
         last = db.query(func.max(Transaction.date)).filter(Transaction.business_id == b.id, Transaction.user_id == user.id).scalar()
@@ -1848,7 +2092,6 @@ def run_smart_notifications(user: User = Depends(get_current_user), db: Session 
                 db.add(Notification(user_id=user.id, kind="warning", message=msg))
                 created.append(msg)
 
-    # New hotspot affordable
     try:
         proj = hotspot_projection(user=user, db=db)
         if proj.days_until_target is not None and proj.days_until_target <= 3 and proj.current < proj.target:
@@ -1860,7 +2103,6 @@ def run_smart_notifications(user: User = Depends(get_current_user), db: Session 
     except Exception:
         pass
 
-    # Savings target reached — proxy: savings balance crossed a round number milestone
     balance = float(db.query(func.coalesce(func.sum(Savings.amount_saved), 0.0)).filter(Savings.user_id == user.id).scalar() or 0.0)
     milestone = 1_000_000
     if balance >= milestone:
@@ -1870,6 +2112,14 @@ def run_smart_notifications(user: User = Depends(get_current_user), db: Session 
             msg = f"Your savings balance passed {crossed:,.0f} {user.currency} — a real milestone."
             db.add(Notification(user_id=user.id, kind="success", message=msg))
             created.append(msg)
+
+    # New: today's business recommendation ready
+    frag_rec = "new business idea is ready"
+    existing_rec_today = db.query(BusinessRecommendation).filter(BusinessRecommendation.user_id == user.id, BusinessRecommendation.date == today).first()
+    if not existing_rec_today and not _recent_notification_exists(db, user, frag_rec):
+        msg = "Today's new business idea is ready in the Business Ideas tab."
+        db.add(Notification(user_id=user.id, kind="info", message=msg))
+        created.append(msg)
 
     db.commit()
     return {"created": created}
@@ -1923,7 +2173,7 @@ def dashboard(user: User = Depends(get_current_user), db: Session = Depends(get_
     priorities = [
         "Record every transaction, revenue and expense.",
         "Move one business forward, however small.",
-        "Save consistently from today's profit.",
+        "Save consistently from today's profit — never more than a business actually has.",
         "Write tonight's journal entry before you stop working.",
     ]
 
@@ -1993,7 +2243,6 @@ def dashboard_charts(days: int = 30, user: User = Depends(get_current_user), db:
 @app.get("/analytics/forecast")
 def analytics_forecast(months_history: int = 6, months_forward: int = 12,
                         user: User = Depends(get_current_user), db: Session = Depends(get_db)):
-    """Simple linear trend forecast of monthly net profit, based on recent history."""
     today = date.today()
     history = []
     cursor = today.replace(day=1)
@@ -2075,7 +2324,7 @@ def _rule_based_insights(db: Session, user: User) -> List[str]:
         else:
             insights.append(f"Solid savings discipline — averaging {avg_pct:.0f}% of profit saved. Keep it up.")
     else:
-        insights.append("You haven't recorded any savings yet. Setting aside even 10% of profit builds a real cushion over time.")
+        insights.append("You haven't recorded any savings yet. Setting aside even 10% of a business's profit builds a real cushion over time.")
 
     hotspots = db.query(Hotspot).filter(Hotspot.user_id == user.id, Hotspot.status == "active").all()
     if hotspots:
@@ -2101,21 +2350,25 @@ def _build_full_system_snapshot(db: Session, user: User, light: bool = False) ->
     """Builds a comprehensive snapshot of EVERYTHING the AI can see about
     this user's account — every module in the system, pulled fresh from the
     database. This is the single source of truth handed to Groq for every
-    AI feature (advice, daily recommendations, todo feedback, chat) so
-    responses are always grounded in the user's real, current data rather
-    than guesses. `light=True` trims the heavier historical lists for
-    smaller/cheaper calls, but always includes current totals and balances.
-    """
+    AI feature (advice, daily recommendations, todo feedback, chat, business
+    recommendations) so responses are always grounded in the user's real,
+    current data, including their mission timeline and full savings history,
+    rather than guesses."""
     today = date.today()
     month_start = today.replace(day=1)
 
     businesses = db.query(Business).filter(Business.user_id == user.id).all()
     biz_snapshot = []
     for b in businesses:
+        already_saved = float(db.query(func.coalesce(func.sum(Savings.amount_saved), 0.0)).filter(
+            Savings.user_id == user.id, Savings.business_id == b.id).scalar() or 0.0)
+        avail, profit_to_date, _ = _business_available_for_savings(db, user, b.id)
         biz_snapshot.append({
             "id": b.id, "name": b.name, "category": b.category, "status": b.status,
             "revenue_mtd": _sum_business_tx(db, user, b.id, "revenue", month_start, today),
             "expense_mtd": _sum_business_tx(db, user, b.id, "expense", month_start, today),
+            "profit_to_date": profit_to_date, "already_saved_from_this_business": already_saved,
+            "available_to_save_from_this_business": avail,
         })
 
     goals = db.query(Goal).filter(Goal.user_id == user.id).all()
@@ -2138,17 +2391,26 @@ def _build_full_system_snapshot(db: Session, user: User, light: bool = False) ->
     mission = get_mission(user)
 
     todos_today = db.query(Todo).filter(Todo.user_id == user.id, Todo.due_date == today).all()
-    todo_snapshot = [{"title": t.title, "priority": t.priority, "status": t.status} for t in todos_today]
+    todo_snapshot = [{"title": t.title, "priority": t.priority, "status": t.status, "recurring": bool(t.recurring)} for t in todos_today]
 
     score, breakdown, _, tasks_total, tasks_completed = _compute_execution_score(db, user, today)
 
     snapshot = {
         "currency": user.currency,
         "today": today.isoformat(),
-        "mission": {"title": mission.title, "phase": mission.current_phase, "percent_complete": mission.percent_complete},
+        "mission": {
+            "title": mission.title,
+            "start_date": mission.start_date.isoformat() if mission.start_date else None,
+            "end_date": mission.end_date.isoformat() if mission.end_date else None,
+            "total_days": mission.total_days,
+            "days_completed": mission.days_completed,
+            "days_remaining": mission.days_remaining,
+            "percent_complete": mission.percent_complete,
+            "phase": mission.current_phase,
+        },
         "businesses": biz_snapshot,
         "goals": goal_snapshot,
-        "savings_balance": savings_balance,
+        "savings_total_balance": savings_balance,
         "total_investments": total_investments,
         "total_assets": total_assets,
         "net_worth": savings_balance + total_investments + total_assets,
@@ -2158,10 +2420,6 @@ def _build_full_system_snapshot(db: Session, user: User, light: bool = False) ->
         "execution_breakdown": breakdown,
     }
 
-    # Always include this extra depth too — "light" only exists to keep a
-    # couple of very small, latency-sensitive calls cheaper; every AI call
-    # in this app still gets the full financial picture above plus the
-    # following historical context unless explicitly trimmed.
     if not light:
         recent_journal = db.query(JournalEntry).filter(JournalEntry.user_id == user.id).order_by(JournalEntry.date.desc()).limit(5).all()
         snapshot["recent_journal"] = [
@@ -2179,15 +2437,24 @@ def _build_full_system_snapshot(db: Session, user: User, light: bool = False) ->
         snapshot["unread_notifications"] = [n.message for n in unread_notifs]
         all_open_todos = db.query(Todo).filter(Todo.user_id == user.id, Todo.status.in_(["pending", "in_progress"])).order_by(Todo.due_date.asc()).limit(30).all()
         snapshot["all_open_tasks"] = [
-            {"title": t.title, "priority": t.priority, "due_date": t.due_date.isoformat(), "status": t.status}
+            {"title": t.title, "priority": t.priority, "due_date": t.due_date.isoformat(), "status": t.status, "recurring": bool(t.recurring)}
             for t in all_open_todos
         ]
         daily_scores = db.query(DailyScore).filter(DailyScore.user_id == user.id).order_by(DailyScore.date.desc()).limit(14).all()
         snapshot["recent_daily_scores"] = [{"date": d.date.isoformat(), "score": d.score} for d in daily_scores]
-        savings_rows = db.query(Savings).filter(Savings.user_id == user.id).order_by(Savings.date.desc()).limit(10).all()
-        snapshot["recent_savings"] = [
-            {"date": s.date.isoformat(), "percentage": s.percentage, "amount_saved": s.amount_saved, "balance_after": s.balance_after}
+        biz_map = {b.id: b.name for b in businesses}
+        savings_rows = db.query(Savings).filter(Savings.user_id == user.id).order_by(Savings.date.desc()).limit(15).all()
+        snapshot["recent_savings_records"] = [
+            {
+                "date": s.date.isoformat(), "business": biz_map.get(s.business_id, "—"),
+                "percentage": s.percentage, "amount_saved": s.amount_saved, "balance_after": s.balance_after,
+            }
             for s in savings_rows
+        ]
+        recent_recs = db.query(BusinessRecommendation).filter(BusinessRecommendation.user_id == user.id).order_by(BusinessRecommendation.date.desc()).limit(10).all()
+        snapshot["recent_business_recommendations"] = [
+            {"date": r.date.isoformat(), "business_name": r.business_name, "category": r.category}
+            for r in recent_recs
         ]
 
     return snapshot
@@ -2196,13 +2463,14 @@ def _build_full_system_snapshot(db: Session, user: User, light: bool = False) ->
 def _groq_financial_insights(db: Session, user: User, fallback: List[str]) -> List[str]:
     snapshot = _build_full_system_snapshot(db, user, light=False)
     prompt = (
-        "You are a sharp, encouraging business advisor for a small entrepreneur running "
-        "multiple side businesses. Given this JSON snapshot of their FULL current account data "
-        "(businesses, goals, savings, investments, assets, hotspots, tasks, recent transactions, "
-        "recent journal entries, and daily scores), respond ONLY with a JSON array of 3-6 short, "
-        "concrete, specific insight strings (no preamble, no markdown fences, no numbering). "
-        "Mention business names and real numbers where useful. Cover: performance comparisons, "
-        "savings trend, goal progress, and any risk to flag.\n\n" + json.dumps(snapshot, default=str)
+        _currency_instruction(user) + " You are a sharp, encouraging business advisor for a small "
+        "entrepreneur running multiple side businesses in Uganda. Given this JSON snapshot of their "
+        "FULL current account data (mission timeline, businesses, goals, savings history per business, "
+        "investments, assets, hotspots, tasks, recent transactions, recent journal entries, and daily "
+        "scores), respond ONLY with a JSON array of 3-6 short, concrete, specific insight strings (no "
+        "preamble, no markdown fences, no numbering). Mention business names and real numbers where "
+        "useful. Cover: performance comparisons, savings trend per business, goal progress, and any risk "
+        "to flag.\n\n" + json.dumps(snapshot, default=str)
     )
     text = _call_groq(prompt, context="financial_insights")
     parsed = _parse_json_array(text) if text else None
@@ -2229,7 +2497,7 @@ def ai_advice(user: User = Depends(get_current_user), db: Session = Depends(get_
 _DEFAULT_DAILY_ROUTINES = [
     "Log every sale and expense the moment it happens — don't rely on memory at day's end.",
     "Spend 10 focused minutes on your lowest-performing business today.",
-    "Set aside a fixed percentage of today's profit before you spend any of it.",
+    "Set aside a fixed percentage of today's profit before you spend any of it, from the business that earned it.",
     "Write a 4-line journal entry tonight: what you did, a challenge, a lesson, one improvement for tomorrow.",
     "Check in briefly on every active hotspot or business location at least every 3 days.",
 ]
@@ -2237,20 +2505,18 @@ _DEFAULT_DAILY_ROUTINES = [
 
 @app.get("/ai/daily-recommendations")
 def ai_daily_recommendations(user: User = Depends(get_current_user), db: Session = Depends(get_db)):
-    """Groq-powered daily activities, behaviors, habits and routines,
-    personalized from the user's FULL current account data (mission,
-    execution score, tasks, businesses, goals, savings, recent journal)."""
     if not GROQ_API_KEY:
         return {"source": "rule_based", "recommendations": _DEFAULT_DAILY_ROUTINES}
 
     snapshot = _build_full_system_snapshot(db, user, light=False)
     prompt = (
-        "You are a disciplined personal-operations coach for an entrepreneur running several "
-        "small businesses toward a long-term financial mission. Given this JSON snapshot of their "
-        "FULL current account data, respond ONLY with a JSON array of 5-7 short, specific, "
-        "actionable daily activities, behaviors, habits, or routines the person should follow "
-        "TODAY to move their mission forward and raise tomorrow's execution score. No preamble, "
-        "no markdown fences, no numbering.\n\n" + json.dumps(snapshot, default=str)
+        _currency_instruction(user) + " You are a disciplined personal-operations coach for an "
+        "entrepreneur in Uganda running several small businesses toward a long-term financial mission. "
+        "Given this JSON snapshot of their FULL current account data (including their mission start/end "
+        "dates and progress, and their savings history), respond ONLY with a JSON array of 5-7 short, "
+        "specific, actionable daily activities, behaviors, habits, or routines the person should follow "
+        "TODAY to move their mission forward and raise tomorrow's execution score. No preamble, no "
+        "markdown fences, no numbering.\n\n" + json.dumps(snapshot, default=str)
     )
     text = _call_groq(prompt, context="daily_recommendations")
     parsed = _parse_json_array(text) if text else None
@@ -2263,6 +2529,107 @@ def ai_daily_recommendations(user: User = Depends(get_current_user), db: Session
 def ai_insights_history(limit: int = 25, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     rows = db.query(AIInsightHistory).filter(AIInsightHistory.user_id == user.id).order_by(AIInsightHistory.created_at.desc()).limit(limit).all()
     return [{"id": r.id, "content": r.content, "created_at": r.created_at} for r in rows]
+
+
+# ----------------------------------------------------------------------------
+# Business Recommendations — one profitable Uganda business idea per day,
+# personalized where possible, permanently recorded per user.
+# ----------------------------------------------------------------------------
+
+def _biz_rec_out(r: BusinessRecommendation) -> BusinessRecommendationOut:
+    return BusinessRecommendationOut(
+        id=r.id, date=r.date, business_name=r.business_name, category=r.category,
+        summary=r.summary, plan=r.plan, estimated_startup_cost=r.estimated_startup_cost,
+        estimated_monthly_profit=r.estimated_monthly_profit, source=r.source,
+    )
+
+
+def _generate_business_recommendation(db: Session, user: User, on_date: date) -> BusinessRecommendation:
+    recent = db.query(BusinessRecommendation).filter(BusinessRecommendation.user_id == user.id).order_by(BusinessRecommendation.date.desc()).limit(20).all()
+    recent_names = [r.business_name for r in recent]
+
+    if GROQ_API_KEY:
+        snapshot = _build_full_system_snapshot(db, user, light=True)
+        prompt = (
+            _currency_instruction(user) + " You are a Ugandan small-business consultant. Suggest ONE "
+            "profitable, realistic small business opportunity suited to Uganda's market today, scaled to "
+            "this specific user's current financial capacity (their savings balance, net worth, and "
+            "existing businesses — don't suggest something wildly out of reach or trivially small for "
+            "them). Do NOT repeat any of these previously suggested businesses for this user: "
+            + json.dumps(recent_names) + ". User's current account snapshot: " + json.dumps(snapshot, default=str) +
+            ". Respond ONLY with a JSON object with these exact keys: business_name (string), "
+            "category (string), summary (1-2 sentence string), plan (a single string containing a "
+            "numbered step-by-step actionable plan of 5-8 steps, steps separated by \\n), "
+            "estimated_startup_cost (number, in " + user.currency + "), "
+            "estimated_monthly_profit (number, in " + user.currency + "). No markdown fences, no extra keys."
+        )
+        text = _call_groq(prompt, context="business_recommendation")
+        parsed = _parse_json_object(text) if text else None
+        if parsed and parsed.get("business_name") and parsed.get("plan"):
+            try:
+                return BusinessRecommendation(
+                    user_id=user.id, date=on_date,
+                    business_name=str(parsed.get("business_name"))[:200],
+                    category=str(parsed.get("category") or "General")[:100],
+                    summary=str(parsed.get("summary") or ""),
+                    plan=str(parsed.get("plan") or ""),
+                    estimated_startup_cost=float(parsed.get("estimated_startup_cost") or 0),
+                    estimated_monthly_profit=float(parsed.get("estimated_monthly_profit") or 0),
+                    source="groq",
+                )
+            except (TypeError, ValueError):
+                pass
+
+    # Fallback: cycle through the curated Uganda idea list, skipping ideas
+    # this user has already seen recently, varied per-user so different
+    # accounts don't all see the same idea on the same day.
+    used_recent = set(recent_names[:len(UGANDA_BUSINESS_IDEAS)])
+    idx = (on_date.toordinal() + user.id) % len(UGANDA_BUSINESS_IDEAS)
+    candidate = UGANDA_BUSINESS_IDEAS[idx]
+    tries = 0
+    while candidate["name"] in used_recent and tries < len(UGANDA_BUSINESS_IDEAS):
+        idx = (idx + 1) % len(UGANDA_BUSINESS_IDEAS)
+        candidate = UGANDA_BUSINESS_IDEAS[idx]
+        tries += 1
+
+    return BusinessRecommendation(
+        user_id=user.id, date=on_date, business_name=candidate["name"], category=candidate["category"],
+        summary=candidate["summary"], plan=candidate["plan"],
+        estimated_startup_cost=candidate["startup_cost"], estimated_monthly_profit=candidate["monthly_profit"],
+        source="rule_based",
+    )
+
+
+@app.get("/business-recommendations/today", response_model=BusinessRecommendationOut)
+def business_recommendation_today(force: bool = False, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    today = date.today()
+    existing = db.query(BusinessRecommendation).filter(BusinessRecommendation.user_id == user.id, BusinessRecommendation.date == today).first()
+    if existing and not force:
+        return _biz_rec_out(existing)
+
+    rec = _generate_business_recommendation(db, user, today)
+    if existing and force:
+        existing.business_name = rec.business_name
+        existing.category = rec.category
+        existing.summary = rec.summary
+        existing.plan = rec.plan
+        existing.estimated_startup_cost = rec.estimated_startup_cost
+        existing.estimated_monthly_profit = rec.estimated_monthly_profit
+        existing.source = rec.source
+        db.commit()
+        db.refresh(existing)
+        return _biz_rec_out(existing)
+
+    db.add(rec)
+    db.commit()
+    db.refresh(rec)
+    return _biz_rec_out(rec)
+
+
+@app.get("/business-recommendations/history", response_model=List[BusinessRecommendationOut])
+def business_recommendation_history(limit: int = Query(60, le=500), user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    rows = db.query(BusinessRecommendation).filter(BusinessRecommendation.user_id == user.id).order_by(BusinessRecommendation.date.desc()).limit(limit).all()
+    return [_biz_rec_out(r) for r in rows]
 
 
 # ----------------------------------------------------------------------------
@@ -2290,9 +2657,6 @@ def _record_groq_success(context: str):
 
 
 def _groq_chat_completion(messages: List[dict]) -> Optional[str]:
-    """Low-level call to Groq's OpenAI-compatible chat completions endpoint.
-    Returns the assistant message text, or raises on any HTTP/parsing error
-    so the calling wrapper can log and record it."""
     headers = {
         "Authorization": f"Bearer {GROQ_API_KEY}",
         "Content-Type": "application/json",
@@ -2308,10 +2672,6 @@ def _groq_chat_completion(messages: List[dict]) -> Optional[str]:
 
 
 def _call_groq(prompt: str, context: str = "generic") -> Optional[str]:
-    """Single-turn Groq call used by the advisor/insights/recommendations
-    endpoints. Returns None (never raises) if Groq is unavailable or the
-    call fails — callers fall back to rule-based output — but every failure
-    is logged and recorded for GET /ai/status."""
     if not GROQ_API_KEY:
         logger.warning("GROQ_API_KEY is not set — skipping Groq call [%s].", context)
         return None
@@ -2328,10 +2688,6 @@ def _call_groq(prompt: str, context: str = "generic") -> Optional[str]:
 
 
 def _call_groq_chat(system_context: str, history: List[dict], message: str) -> Optional[str]:
-    """Multi-turn Groq call used by the AI Chat assistant. Sends the full
-    conversation history plus the current message, with the full system
-    snapshot injected as a system message so every reply is grounded in
-    the user's live account data."""
     if not GROQ_API_KEY:
         logger.warning("GROQ_API_KEY is not set — skipping Groq chat call.")
         return None
@@ -2371,9 +2727,6 @@ def _parse_json_array(text: str) -> Optional[list]:
 
 @app.get("/ai/status")
 def ai_status(user: User = Depends(get_current_user)):
-    """Diagnostic endpoint — check this first if AI features seem to be
-    silently falling back to rule-based output. Shows whether Groq is
-    configured, which model is targeted, and the last error/success."""
     return {
         "groq_configured": bool(GROQ_API_KEY),
         "groq_model": GROQ_MODEL,
@@ -2386,9 +2739,7 @@ def ai_status(user: User = Depends(get_current_user)):
 # AI Chat — full-system-aware conversational advisor (Groq only)
 # ----------------------------------------------------------------------------
 
-def _rule_based_chat_reply(snapshot: dict, message: str) -> str:
-    """A minimal offline fallback so the chat still responds usefully if
-    Groq is not configured or a call fails."""
+def _rule_based_chat_reply(snapshot: dict, message: str, currency: str) -> str:
     lower = message.lower()
     if "task" in lower or "todo" in lower:
         tasks = snapshot.get("all_open_tasks", [])
@@ -2398,17 +2749,22 @@ def _rule_based_chat_reply(snapshot: dict, message: str) -> str:
         return f"You have {len(tasks)} open task(s), including: {top}. Want help prioritizing them?"
     if "score" in lower:
         return f"Today's execution score is {snapshot.get('todays_execution_score', 0)}%. Complete your open tasks and log today's numbers to raise it."
+    if "mission" in lower:
+        m = snapshot.get("mission", {})
+        return f"Mission '{m.get('title')}' runs {m.get('start_date')} to {m.get('end_date')} — {m.get('percent_complete')}% complete, {m.get('days_remaining')} day(s) remaining, currently in {m.get('phase')}."
+    if "saving" in lower:
+        return f"Total savings balance is {snapshot.get('savings_total_balance', 0):,.0f} {currency}. Each business can only be saved from up to its own actual profit."
     if "goal" in lower:
         goals = snapshot.get("goals", [])
         if not goals:
             return "You don't have any goals set yet — add one from the Goals page and I can track progress with you."
-        lines = [f"{g['name']}: {g['current']:,.0f}/{g['target']:,.0f}" for g in goals[:3]]
+        lines = [f"{g['name']}: {g['current']:,.0f}/{g['target']:,.0f} {currency}" for g in goals[:3]]
         return "Here's where your goals stand — " + "; ".join(lines)
     if "business" in lower or "profit" in lower:
         biz = snapshot.get("businesses", [])
         if not biz:
             return "You haven't added any businesses yet — add one and I can start comparing performance."
-        lines = [f"{b['name']}: revenue {b['revenue_mtd']:,.0f}, expenses {b['expense_mtd']:,.0f}" for b in biz[:3]]
+        lines = [f"{b['name']}: revenue {b['revenue_mtd']:,.0f} {currency}, expenses {b['expense_mtd']:,.0f} {currency}" for b in biz[:3]]
         return "This month so far — " + "; ".join(lines)
     if not GROQ_API_KEY:
         return (
@@ -2420,7 +2776,7 @@ def _rule_based_chat_reply(snapshot: dict, message: str) -> str:
         f"I'm tracking your full system — {len(snapshot.get('businesses', []))} business(es), "
         f"{len(snapshot.get('goals', []))} goal(s), and today's execution score of "
         f"{snapshot.get('todays_execution_score', 0)}%. Ask me about your tasks, goals, businesses, "
-        "savings, or what to focus on today."
+        "savings, mission timeline, or what to focus on today."
     )
 
 
@@ -2428,13 +2784,9 @@ def _rule_based_chat_reply(snapshot: dict, message: str) -> str:
 def ai_chat(body: ChatIn, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     """Conversational AI Advisor that is aware of everything running in the
     system for this user: every business, transaction summary, goal, savings
-    balance, hotspot, task, journal note, notification, mission status and
-    daily score. The full snapshot is rebuilt fresh from the database on
-    every message, and the recent conversation history is sent alongside it,
-    so Groq is always grounded in current data and stays context-aware
-    across turns. Groq is the sole AI provider — if it's unavailable or a
-    call fails, a lightweight rule-based reply is used instead so the chat
-    never hard-fails."""
+    balance and history per business, hotspot, task, journal note,
+    notification, mission timeline, business-idea history, and daily score.
+    The full snapshot is rebuilt fresh from the database on every message."""
     message = body.message.strip()
     if not message:
         raise HTTPException(status_code=400, detail="Message cannot be empty.")
@@ -2444,23 +2796,25 @@ def ai_chat(body: ChatIn, user: User = Depends(get_current_user), db: Session = 
     history = [{"role": h.role, "content": h.content} for h in reversed(history_rows)]
 
     system_context = (
-        "You are the AI Advisor inside this user's Business Growth Tracker app. You are fully "
-        "aware of everything running in their system — every business, every transaction summary, "
-        "every goal, savings balance, active hotspots, today's tasks, all currently open tasks, "
-        "recent journal entries, recent savings deposits, unread notifications, mission status, "
-        "and recent daily execution scores. Use this JSON snapshot of their live data, pulled "
-        "fresh from the database for this message, to answer specifically and accurately, "
-        "referencing real numbers and names where relevant. Be direct, encouraging, and concise "
-        "(usually under 120 words unless the question needs more). If asked to analyze the whole "
-        "system, walk through the key modules briefly. If data for something is missing, say so "
-        "plainly instead of guessing. Keep track of the conversation so far and stay consistent "
-        "with anything you or the user said earlier in this chat.\n\n"
+        _currency_instruction(user) + " You are the AI Advisor inside this user's Business Growth "
+        "Tracker app. You are fully aware of everything running in their system — every business, "
+        "every transaction summary, every goal, total and per-business savings balances and history, "
+        "active hotspots, today's tasks, all currently open tasks, recent journal entries, recent "
+        "business-idea recommendations, unread notifications, their full mission timeline (start date, "
+        "end date, percent complete, days remaining, current phase), and recent daily execution scores. "
+        "Use this JSON snapshot of their live data, pulled fresh from the database for this message, to "
+        "answer specifically and accurately, referencing real numbers and names where relevant. Remember "
+        "that savings are tracked per business and a business can never have more saved from it than its "
+        "actual profit. Be direct, encouraging, and concise (usually under 120 words unless the question "
+        "needs more). If asked to analyze the whole system, walk through the key modules briefly. If data "
+        "for something is missing, say so plainly instead of guessing. Keep track of the conversation so "
+        "far and stay consistent with anything you or the user said earlier in this chat.\n\n"
         "CURRENT SYSTEM SNAPSHOT (JSON, live from the database):\n" + json.dumps(snapshot, default=str)
     )
 
     reply = _call_groq_chat(system_context, history, message)
     if not reply:
-        reply = _rule_based_chat_reply(snapshot, message)
+        reply = _rule_based_chat_reply(snapshot, message, user.currency)
 
     db.add(ChatMessage(user_id=user.id, role="user", content=message))
     db.add(ChatMessage(user_id=user.id, role="assistant", content=reply))
@@ -2482,6 +2836,8 @@ def ai_chat_history(limit: int = Query(60, le=500), user: User = Depends(get_cur
 
 @app.delete("/ai/chat/history")
 def clear_ai_chat_history(user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    """Wipes the AI Advisor chat history for this user — used by the
+    'Clear chat' button in the AI Advisor tab."""
     db.query(ChatMessage).filter(ChatMessage.user_id == user.id).delete()
     db.commit()
     return {"ok": True}
