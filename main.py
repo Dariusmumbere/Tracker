@@ -182,7 +182,30 @@ def _parse_json_object(text: Optional[str]) -> Optional[dict]:
 # ----------------------------------------------------------------------------
 
 connect_args = {"check_same_thread": False} if DATABASE_URL.startswith("sqlite") else {}
-engine = create_engine(DATABASE_URL, connect_args=connect_args)
+
+# NOTE ON pool_pre_ping / pool_recycle
+# -------------------------------------
+# NeonDB is a serverless Postgres — it silently closes connections that have
+# been idle for a while (and can also suspend the whole compute branch after
+# inactivity). Without pool_pre_ping, SQLAlchemy's connection pool has no way
+# to know a pooled connection has gone stale, and will happily hand that dead
+# connection back out to the next request. That request then fails deep
+# inside the DB driver (do_execute -> _handle_dbapi_exception -> raise),
+# which is exactly the crash pattern seen coming out of endpoints like
+# business_empire() after a period of low traffic — the query itself
+# (a plain func.sum(...).scalar() with no group_by) is not the bug; the
+# connection underneath it was already dead.
+#
+# pool_pre_ping=True makes SQLAlchemy issue a cheap "is this connection still
+# alive" check before handing a pooled connection to a request, transparently
+# reconnecting if it isn't. pool_recycle proactively retires connections
+# before Neon's own idle timeout can kill them from the server side.
+engine = create_engine(
+    DATABASE_URL,
+    connect_args=connect_args,
+    pool_pre_ping=True,
+    pool_recycle=280,
+)
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 Base = declarative_base()
 
