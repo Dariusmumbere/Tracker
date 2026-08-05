@@ -243,6 +243,7 @@ class User(Base):
     goals = relationship("Goal", back_populates="owner", cascade="all, delete-orphan")
     notifications = relationship("Notification", back_populates="owner", cascade="all, delete-orphan")
     insight_history = relationship("AIInsightHistory", back_populates="owner", cascade="all, delete-orphan")
+    principles = relationship("Principle", back_populates="owner", cascade="all, delete-orphan")
     journal_entries = relationship("JournalEntry", back_populates="owner", cascade="all, delete-orphan")
     milestones = relationship("Milestone", back_populates="owner", cascade="all, delete-orphan")
     execution_scores = relationship("ExecutionScore", back_populates="owner", cascade="all, delete-orphan")
@@ -355,6 +356,20 @@ class Goal(Base):
     created_at = Column(DateTime, default=utcnow)
 
     owner = relationship("User", back_populates="goals")
+
+
+class Principle(Base):
+    """A rule the user has committed to never break (e.g. "Never spend
+    savings before recording the sale"). Fed to the AI Advisor on every
+    call so its advice always respects the user's own hard limits."""
+    __tablename__ = "principles"
+    id = Column(Integer, primary_key=True, index=True)
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=False, index=True)
+    title = Column(String, nullable=False)
+    description = Column(String, default="")
+    created_at = Column(DateTime, default=utcnow)
+
+    owner = relationship("User", back_populates="principles")
 
 
 class Notification(Base):
@@ -800,6 +815,26 @@ class GoalOut(BaseModel):
     progress_percent: float
     amount_remaining: float
     estimated_completion_date: Optional[date] = None
+
+
+class PrincipleIn(BaseModel):
+    title: str
+    description: str = ""
+
+
+class PrincipleUpdateIn(BaseModel):
+    title: Optional[str] = None
+    description: Optional[str] = None
+
+
+class PrincipleOut(BaseModel):
+    id: int
+    title: str
+    description: str
+    created_at: dt
+
+    class Config:
+        from_attributes = True
 
 
 class NotificationOut(BaseModel):
@@ -1496,6 +1531,55 @@ def delete_goal(goal_id: int, user: User = Depends(get_current_user), db: Sessio
     if not g:
         raise HTTPException(status_code=404, detail=f"Goal {goal_id} not found for this account.")
     db.delete(g)
+    db.commit()
+    return {"ok": True}
+
+
+# ----------------------------------------------------------------------------
+# Non-Negotiable Principles — rules the user commits to never break.
+# Set here, in Settings; the AI Advisor is handed these on every request
+# (see _build_full_system_snapshot) so it always advises within them.
+# ----------------------------------------------------------------------------
+
+@app.get("/principles", response_model=List[PrincipleOut])
+def list_principles(user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    return db.query(Principle).filter(Principle.user_id == user.id).order_by(Principle.created_at.asc()).all()
+
+
+@app.post("/principles", response_model=PrincipleOut)
+def create_principle(body: PrincipleIn, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    title = body.title.strip()
+    if not title:
+        raise HTTPException(status_code=400, detail="Principle title is required.")
+    p = Principle(user_id=user.id, title=title, description=body.description.strip())
+    db.add(p)
+    db.commit()
+    db.refresh(p)
+    return p
+
+
+@app.put("/principles/{principle_id}", response_model=PrincipleOut)
+def update_principle(principle_id: int, body: PrincipleUpdateIn, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    p = db.query(Principle).filter(Principle.id == principle_id, Principle.user_id == user.id).first()
+    if not p:
+        raise HTTPException(status_code=404, detail=f"Principle {principle_id} not found for this account.")
+    if body.title is not None:
+        title = body.title.strip()
+        if title:
+            p.title = title
+    if body.description is not None:
+        p.description = body.description.strip()
+    db.commit()
+    db.refresh(p)
+    return p
+
+
+@app.delete("/principles/{principle_id}")
+def delete_principle(principle_id: int, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    p = db.query(Principle).filter(Principle.id == principle_id, Principle.user_id == user.id).first()
+    if not p:
+        raise HTTPException(status_code=404, detail=f"Principle {principle_id} not found for this account.")
+    db.delete(p)
     db.commit()
     return {"ok": True}
 
@@ -2413,6 +2497,11 @@ def _build_full_system_snapshot(db: Session, user: User, light: bool = False) ->
 
     mission = get_mission(user)
 
+    # Non-negotiable principles — always included (not just in the "full"
+    # snapshot) since they're few and must constrain every AI response.
+    principles = db.query(Principle).filter(Principle.user_id == user.id).order_by(Principle.created_at.asc()).all()
+    principle_snapshot = [{"title": p.title, "description": p.description} for p in principles]
+
     todos_today = db.query(Todo).filter(Todo.user_id == user.id, Todo.due_date == today).all()
     todo_snapshot = [{"title": t.title, "priority": t.priority, "status": t.status, "recurring": bool(t.recurring)} for t in todos_today]
 
@@ -2431,6 +2520,7 @@ def _build_full_system_snapshot(db: Session, user: User, light: bool = False) ->
             "percent_complete": mission.percent_complete,
             "phase": mission.current_phase,
         },
+        "non_negotiable_principles": principle_snapshot,
         "businesses": biz_snapshot,
         "goals": goal_snapshot,
         "savings_total_balance": savings_balance,
@@ -2493,7 +2583,9 @@ def _groq_financial_insights(db: Session, user: User, fallback: List[str]) -> Li
         "scores), respond ONLY with a JSON array of 3-6 short, concrete, specific insight strings (no "
         "preamble, no markdown fences, no numbering). Mention business names and real numbers where "
         "useful. Cover: performance comparisons, savings trend per business, goal progress, and any risk "
-        "to flag.\n\n" + json.dumps(snapshot, default=str)
+        "to flag. The snapshot's non_negotiable_principles are rules the user will never break — treat "
+        "them as hard constraints, and if an insight touches one, name it and add a short description of "
+        "what it means.\n\n" + json.dumps(snapshot, default=str)
     )
     text = _call_groq(prompt, context="financial_insights")
     parsed = _parse_json_array(text) if text else None
@@ -2538,8 +2630,10 @@ def ai_daily_recommendations(user: User = Depends(get_current_user), db: Session
         "Given this JSON snapshot of their FULL current account data (including their mission start/end "
         "dates and progress, and their savings history), respond ONLY with a JSON array of 5-7 short, "
         "specific, actionable daily activities, behaviors, habits, or routines the person should follow "
-        "TODAY to move their mission forward and raise tomorrow's execution score. No preamble, no "
-        "markdown fences, no numbering.\n\n" + json.dumps(snapshot, default=str)
+        "TODAY to move their mission forward and raise tomorrow's execution score. Never suggest anything "
+        "that conflicts with an entry in non_negotiable_principles; if a recommendation relates to one, "
+        "name it and add a short description of what it means. No preamble, no markdown fences, no "
+        "numbering.\n\n" + json.dumps(snapshot, default=str)
     )
     text = _call_groq(prompt, context="daily_recommendations")
     parsed = _parse_json_array(text) if text else None
@@ -2772,6 +2866,12 @@ def _rule_based_chat_reply(snapshot: dict, message: str, currency: str) -> str:
         return f"You have {len(tasks)} open task(s), including: {top}. Want help prioritizing them?"
     if "score" in lower:
         return f"Today's execution score is {snapshot.get('todays_execution_score', 0)}%. Complete your open tasks and log today's numbers to raise it."
+    if "principle" in lower or "non-negotiable" in lower or "non negotiable" in lower:
+        principles = snapshot.get("non_negotiable_principles", [])
+        if not principles:
+            return "You haven't set any non-negotiable principles yet — add them in Settings and I'll always weigh them in."
+        lines = [f"{p['title']} — {p['description']}" if p.get("description") else p["title"] for p in principles[:5]]
+        return "Your non-negotiable principles: " + "; ".join(lines)
     if "mission" in lower:
         m = snapshot.get("mission", {})
         return f"Mission '{m.get('title')}' runs {m.get('start_date')} to {m.get('end_date')} — {m.get('percent_complete')}% complete, {m.get('days_remaining')} day(s) remaining, currently in {m.get('phase')}."
@@ -2797,9 +2897,10 @@ def _rule_based_chat_reply(snapshot: dict, message: str, currency: str) -> str:
         )
     return (
         f"I'm tracking your full system — {len(snapshot.get('businesses', []))} business(es), "
-        f"{len(snapshot.get('goals', []))} goal(s), and today's execution score of "
+        f"{len(snapshot.get('goals', []))} goal(s), {len(snapshot.get('non_negotiable_principles', []))} "
+        f"non-negotiable principle(s), and today's execution score of "
         f"{snapshot.get('todays_execution_score', 0)}%. Ask me about your tasks, goals, businesses, "
-        "savings, mission timeline, or what to focus on today."
+        "savings, principles, mission timeline, or what to focus on today."
     )
 
 
@@ -2808,8 +2909,9 @@ def ai_chat(body: ChatIn, user: User = Depends(get_current_user), db: Session = 
     """Conversational AI Advisor that is aware of everything running in the
     system for this user: every business, transaction summary, goal, savings
     balance and history per business, hotspot, task, journal note,
-    notification, mission timeline, business-idea history, and daily score.
-    The full snapshot is rebuilt fresh from the database on every message."""
+    notification, mission timeline, business-idea history, non-negotiable
+    principles, and daily score. The full snapshot is rebuilt fresh from
+    the database on every message."""
     message = body.message.strip()
     if not message:
         raise HTTPException(status_code=400, detail="Message cannot be empty.")
@@ -2828,10 +2930,15 @@ def ai_chat(body: ChatIn, user: User = Depends(get_current_user), db: Session = 
         "Use this JSON snapshot of their live data, pulled fresh from the database for this message, to "
         "answer specifically and accurately, referencing real numbers and names where relevant. Remember "
         "that savings are tracked per business and a business can never have more saved from it than its "
-        "actual profit. Be direct, encouraging, and concise (usually under 120 words unless the question "
-        "needs more). If asked to analyze the whole system, walk through the key modules briefly. If data "
-        "for something is missing, say so plainly instead of guessing. Keep track of the conversation so "
-        "far and stay consistent with anything you or the user said earlier in this chat.\n\n"
+        "actual profit. The snapshot's non_negotiable_principles are rules the user has personally "
+        "committed to never break — treat every one of them as a hard constraint on your advice, never "
+        "suggest anything that conflicts with one, and whenever a principle is relevant to the question, "
+        "name it and add a short one-sentence description of what it means, in your own words, so the "
+        "user is reminded why it matters. Be direct, encouraging, and concise (usually under 120 words "
+        "unless the question needs more). If asked to analyze the whole system, walk through the key "
+        "modules briefly. If data for something is missing, say so plainly instead of guessing. Keep "
+        "track of the conversation so far and stay consistent with anything you or the user said earlier "
+        "in this chat.\n\n"
         "CURRENT SYSTEM SNAPSHOT (JSON, live from the database):\n" + json.dumps(snapshot, default=str)
     )
 
