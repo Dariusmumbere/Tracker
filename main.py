@@ -9,9 +9,11 @@ import datetime
 from datetime import datetime as dt, date, timedelta, timezone
 from typing import Optional, List
 
+from contextvars import ContextVar
+
 import jwt
 import requests
-from fastapi import FastAPI, Depends, HTTPException, status, Query
+from fastapi import FastAPI, Depends, HTTPException, status, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from pydantic import BaseModel, EmailStr, field_validator
@@ -215,6 +217,27 @@ def utcnow():
 
 
 # ----------------------------------------------------------------------------
+# Client-local "today" — the server (and its DB) may run in a different
+# timezone than the device the user is holding (e.g. server in UTC, user in
+# Kampala/UTC+3). Every request from the frontend carries an `X-Client-Date`
+# header with the calendar date on the user's own device. The middleware
+# below stashes it in a ContextVar for the duration of the request; every
+# place in this file that needs "today" calls client_today(), so due dates,
+# streaks, "today"'s totals, goal countdowns, weekly/monthly boundaries, etc.
+# all line up with what the user actually sees on their screen. If a request
+# arrives without the header
+# (e.g. a health check, or an older frontend build) we fall back to the
+# server's UTC date rather than failing.
+# ----------------------------------------------------------------------------
+
+_client_date_ctx: ContextVar[Optional[date]] = ContextVar("_client_date_ctx", default=None)
+
+
+def client_today() -> date:
+    return _client_date_ctx.get() or dt.now(timezone.utc).date()
+
+
+# ----------------------------------------------------------------------------
 # Models
 # ----------------------------------------------------------------------------
 
@@ -259,7 +282,7 @@ class Business(Base):
     user_id = Column(Integer, ForeignKey("users.id"), nullable=False, index=True)
     name = Column(String, nullable=False)
     category = Column(String, default="General")
-    start_date = Column(Date, default=lambda: date.today())
+    start_date = Column(Date, default=lambda: client_today())
     description = Column(String, default="")
     status = Column(String, default="active")  # active | paused | closed
     created_at = Column(DateTime, default=utcnow)
@@ -276,7 +299,7 @@ class Transaction(Base):
     amount = Column(Float, nullable=False)
     category = Column(String, default="Other")
     description = Column(String, default="")
-    date = Column(Date, default=lambda: date.today(), index=True)
+    date = Column(Date, default=lambda: client_today(), index=True)
     created_at = Column(DateTime, default=utcnow)
 
     owner = relationship("User", back_populates="transactions")
@@ -287,7 +310,7 @@ class Savings(Base):
     id = Column(Integer, primary_key=True, index=True)
     user_id = Column(Integer, ForeignKey("users.id"), nullable=False, index=True)
     business_id = Column(Integer, ForeignKey("businesses.id"), nullable=True, index=True)
-    date = Column(Date, default=lambda: date.today())
+    date = Column(Date, default=lambda: client_today())
     profit_amount = Column(Float, nullable=False)
     percentage = Column(Float, nullable=False)
     amount_saved = Column(Float, nullable=False)
@@ -306,7 +329,7 @@ class Hotspot(Base):
     business_id = Column(Integer, ForeignKey("businesses.id"), nullable=True)
     location = Column(String, nullable=False)
     installation_cost = Column(Float, default=0)
-    installation_date = Column(Date, default=lambda: date.today())
+    installation_date = Column(Date, default=lambda: client_today())
     monthly_data_cost = Column(Float, default=0)
     monthly_electricity_cost = Column(Float, default=0)
     daily_average_revenue = Column(Float, default=0)
@@ -323,7 +346,7 @@ class Investment(Base):
     business_id = Column(Integer, ForeignKey("businesses.id"), nullable=True)
     name = Column(String, nullable=False)
     cost = Column(Float, nullable=False)
-    purchase_date = Column(Date, default=lambda: date.today())
+    purchase_date = Column(Date, default=lambda: client_today())
     notes = Column(String, default="")
     created_at = Column(DateTime, default=utcnow)
 
@@ -337,7 +360,7 @@ class Asset(Base):
     name = Column(String, nullable=False)
     purchase_price = Column(Float, default=0)
     current_value = Column(Float, default=0)
-    purchase_date = Column(Date, default=lambda: date.today())
+    purchase_date = Column(Date, default=lambda: client_today())
     notes = Column(String, default="")
     created_at = Column(DateTime, default=utcnow)
 
@@ -353,6 +376,8 @@ class Goal(Base):
     current_amount = Column(Float, default=0)
     deadline = Column(Date, nullable=True)
     status = Column(String, default="active")  # active | completed | abandoned
+    priority = Column(String, default="medium")  # low | medium | high
+    remind_days_before = Column(Integer, default=7)  # start surfacing deadline alerts this many days out
     created_at = Column(DateTime, default=utcnow)
 
     owner = relationship("User", back_populates="goals")
@@ -398,7 +423,7 @@ class JournalEntry(Base):
     __tablename__ = "journal_entries"
     id = Column(Integer, primary_key=True, index=True)
     user_id = Column(Integer, ForeignKey("users.id"), nullable=False, index=True)
-    date = Column(Date, default=lambda: date.today(), index=True)
+    date = Column(Date, default=lambda: client_today(), index=True)
     accomplished = Column(String, default="")
     challenges = Column(String, default="")
     learned = Column(String, default="")
@@ -412,7 +437,7 @@ class Milestone(Base):
     __tablename__ = "milestones"
     id = Column(Integer, primary_key=True, index=True)
     user_id = Column(Integer, ForeignKey("users.id"), nullable=False, index=True)
-    milestone_date = Column(Date, default=lambda: date.today(), index=True)
+    milestone_date = Column(Date, default=lambda: client_today(), index=True)
     title = Column(String, nullable=False)
     notes = Column(String, default="")
     created_at = Column(DateTime, default=utcnow)
@@ -425,7 +450,7 @@ class ExecutionScore(Base):
     __tablename__ = "execution_scores"
     id = Column(Integer, primary_key=True, index=True)
     user_id = Column(Integer, ForeignKey("users.id"), nullable=False, index=True)
-    date = Column(Date, default=lambda: date.today(), index=True)
+    date = Column(Date, default=lambda: client_today(), index=True)
     score = Column(Float, default=0)
     breakdown_json = Column(String, default="{}")
     created_at = Column(DateTime, default=utcnow)
@@ -446,7 +471,7 @@ class Todo(Base):
     notes = Column(String, default="")
     priority = Column(String, default="medium")  # low | medium | high
     business_id = Column(Integer, ForeignKey("businesses.id"), nullable=True)
-    due_date = Column(Date, default=lambda: date.today(), index=True)
+    due_date = Column(Date, default=lambda: client_today(), index=True)
     status = Column(String, default="pending")  # pending | in_progress | completed | abandoned
     ai_feedback = Column(String, default="")
     recurring = Column(Boolean, default=False)
@@ -463,7 +488,7 @@ class DailyScore(Base):
     __tablename__ = "daily_scores"
     id = Column(Integer, primary_key=True, index=True)
     user_id = Column(Integer, ForeignKey("users.id"), nullable=False, index=True)
-    date = Column(Date, default=lambda: date.today(), index=True)
+    date = Column(Date, default=lambda: client_today(), index=True)
     score = Column(Float, default=0)
     tasks_total = Column(Integer, default=0)
     tasks_completed = Column(Integer, default=0)
@@ -492,7 +517,7 @@ class BusinessRecommendation(Base):
     __tablename__ = "business_recommendations"
     id = Column(Integer, primary_key=True, index=True)
     user_id = Column(Integer, ForeignKey("users.id"), nullable=False, index=True)
-    date = Column(Date, default=lambda: date.today(), index=True)
+    date = Column(Date, default=lambda: client_today(), index=True)
     business_name = Column(String, nullable=False)
     category = Column(String, default="General")
     summary = Column(String, default="")
@@ -506,6 +531,20 @@ class BusinessRecommendation(Base):
 
 
 Base.metadata.create_all(bind=engine)
+
+# ----------------------------------------------------------------------------
+# Lightweight forward migration: create_all() only creates tables that don't
+# exist yet, it never alters an existing one. The `goals` table already
+# exists in production, so newly-added columns (priority, remind_days_before)
+# need to be added by hand the first time this runs against an older DB.
+# Safe to run every startup — IF NOT EXISTS makes it a no-op afterwards.
+# ----------------------------------------------------------------------------
+try:
+    with engine.begin() as conn:
+        conn.exec_driver_sql("ALTER TABLE goals ADD COLUMN IF NOT EXISTS priority VARCHAR DEFAULT 'medium'")
+        conn.exec_driver_sql("ALTER TABLE goals ADD COLUMN IF NOT EXISTS remind_days_before INTEGER DEFAULT 7")
+except Exception as _mig_err:
+    logger.warning("Goal table migration skipped/failed (non-fatal): %s", _mig_err)
 
 
 def get_db():
@@ -788,6 +827,15 @@ class GoalIn(BaseModel):
     target_amount: float
     current_amount: float = 0
     deadline: Optional[date] = None
+    priority: str = "medium"
+    remind_days_before: int = 7
+
+    @field_validator("priority")
+    @classmethod
+    def priority_valid(cls, v):
+        if v not in ("low", "medium", "high"):
+            raise ValueError("priority must be one of: low, medium, high")
+        return v
 
 
 class GoalUpdateIn(BaseModel):
@@ -796,12 +844,21 @@ class GoalUpdateIn(BaseModel):
     target_amount: Optional[float] = None
     deadline: Optional[date] = None
     status: Optional[str] = None
+    priority: Optional[str] = None
+    remind_days_before: Optional[int] = None
 
     @field_validator("status")
     @classmethod
     def status_valid(cls, v):
         if v is not None and v not in ("active", "completed", "abandoned"):
             raise ValueError("status must be one of: active, completed, abandoned")
+        return v
+
+    @field_validator("priority")
+    @classmethod
+    def priority_valid(cls, v):
+        if v is not None and v not in ("low", "medium", "high"):
+            raise ValueError("priority must be one of: low, medium, high")
         return v
 
 
@@ -812,9 +869,19 @@ class GoalOut(BaseModel):
     current_amount: float
     deadline: Optional[date]
     status: str
+    priority: str
+    remind_days_before: int
     progress_percent: float
     amount_remaining: float
     estimated_completion_date: Optional[date] = None
+    # -- deadline-awareness, computed against the user's own device date --
+    days_remaining: Optional[int] = None      # negative once past the deadline
+    days_elapsed: Optional[int] = None
+    is_overdue: bool = False
+    pace_status: Optional[str] = None         # "ahead" | "on_track" | "behind" | None (no deadline yet)
+    required_daily_amount: Optional[float] = None
+    alert_message: Optional[str] = None
+    alert_level: Optional[str] = None         # "danger" | "warning" | "info" | "success"
 
 
 class PrincipleIn(BaseModel):
@@ -1027,7 +1094,30 @@ app.add_middleware(
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
+    expose_headers=["*"],
 )
+
+
+@app.middleware("http")
+async def _client_date_middleware(request: Request, call_next):
+    """Reads the X-Client-Date header (YYYY-MM-DD, the date on the user's own
+    device) sent by the frontend on every request and makes it available to
+    the rest of the request via client_today(). See the comment above that
+    function for why this exists."""
+    header_val = request.headers.get("x-client-date")
+    token = None
+    if header_val:
+        try:
+            parsed = dt.strptime(header_val[:10], "%Y-%m-%d").date()
+            token = _client_date_ctx.set(parsed)
+        except ValueError:
+            pass
+    try:
+        response = await call_next(request)
+    finally:
+        if token is not None:
+            _client_date_ctx.reset(token)
+    return response
 
 
 @app.get("/health")
@@ -1051,8 +1141,8 @@ def register(body: RegisterIn, db: Session = Depends(get_db)):
         password_hash=digest,
         password_salt=salt,
         currency=body.currency,
-        mission_start_date=date.today(),
-        mission_end_date=date.today() + timedelta(days=730),
+        mission_start_date=client_today(),
+        mission_end_date=client_today() + timedelta(days=730),
     )
     db.add(user)
     db.commit()
@@ -1111,7 +1201,7 @@ def list_businesses(user: User = Depends(get_current_user), db: Session = Depend
 def create_business(body: BusinessIn, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     biz = Business(
         user_id=user.id, name=body.name.strip(), category=body.category or "General",
-        start_date=body.start_date or date.today(), description=body.description or "",
+        start_date=body.start_date or client_today(), description=body.description or "",
     )
     db.add(biz)
     db.commit()
@@ -1166,7 +1256,7 @@ def create_transaction(body: TransactionIn, user: User = Depends(get_current_use
     tx = Transaction(
         user_id=user.id, business_id=body.business_id, type=body.type, amount=body.amount,
         category=body.category or "Other", description=body.description or "",
-        date=body.date or date.today(),
+        date=body.date or client_today(),
     )
     db.add(tx)
     db.commit()
@@ -1212,7 +1302,7 @@ def _business_available_for_savings(db: Session, user: User, business_id: int):
     out of that business; available_to_save is the remainder that can still
     be moved into savings."""
     inception = date(2000, 1, 1)
-    today = date.today()
+    today = client_today()
     revenue = _sum_business_tx(db, user, business_id, "revenue", inception, today)
     expense = _sum_business_tx(db, user, business_id, "expense", inception, today)
     profit_to_date = revenue - expense
@@ -1269,7 +1359,7 @@ def create_savings(body: SavingsIn, user: User = Depends(get_current_user), db: 
     prev_balance = db.query(func.coalesce(func.sum(Savings.amount_saved), 0.0)).filter(Savings.user_id == user.id).scalar()
     balance_after = float(prev_balance) + amount_saved
     rec = Savings(
-        user_id=user.id, business_id=body.business_id, date=body.date or date.today(),
+        user_id=user.id, business_id=body.business_id, date=body.date or client_today(),
         profit_amount=body.profit_amount, percentage=pct, amount_saved=amount_saved,
         remaining_cash=remaining_cash, balance_after=balance_after, note=body.note or "",
     )
@@ -1324,7 +1414,7 @@ def hotspot_projection(user: User = Depends(get_current_user), db: Session = Dep
     hotspots = db.query(Hotspot).filter(Hotspot.user_id == user.id).all()
     if hotspots and current < target:
         avg_cost = sum(h.installation_cost for h in hotspots) / len(hotspots)
-        today = date.today()
+        today = client_today()
         month_start = today.replace(day=1)
         monthly_profit = _tx_sum(db, user, "revenue", month_start, today) - _tx_sum(db, user, "expense", month_start, today)
         daily_savings_rate = max(monthly_profit, 0) / 30 * 0.3
@@ -1348,7 +1438,7 @@ def create_hotspot(body: HotspotIn, user: User = Depends(get_current_user), db: 
         _get_owned_business(db, user, body.business_id)
     h = Hotspot(
         user_id=user.id, business_id=body.business_id, location=body.location.strip(),
-        installation_cost=body.installation_cost, installation_date=body.installation_date or date.today(),
+        installation_cost=body.installation_cost, installation_date=body.installation_date or client_today(),
         monthly_data_cost=body.monthly_data_cost, monthly_electricity_cost=body.monthly_electricity_cost,
         daily_average_revenue=body.daily_average_revenue,
     )
@@ -1388,7 +1478,7 @@ def create_investment(body: InvestmentIn, user: User = Depends(get_current_user)
         _get_owned_business(db, user, body.business_id)
     inv = Investment(
         user_id=user.id, business_id=body.business_id, name=body.name.strip(), cost=body.cost,
-        purchase_date=body.purchase_date or date.today(), notes=body.notes or "",
+        purchase_date=body.purchase_date or client_today(), notes=body.notes or "",
     )
     db.add(inv)
     db.commit()
@@ -1419,7 +1509,7 @@ def list_assets(user: User = Depends(get_current_user), db: Session = Depends(ge
 def create_asset(body: AssetIn, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     a = Asset(
         user_id=user.id, name=body.name.strip(), purchase_price=body.purchase_price,
-        current_value=body.current_value, purchase_date=body.purchase_date or date.today(),
+        current_value=body.current_value, purchase_date=body.purchase_date or client_today(),
         notes=body.notes or "",
     )
     db.add(a)
@@ -1447,8 +1537,8 @@ def _estimate_goal_completion(db: Session, user: User, g: Goal) -> Optional[date
         return None
     remaining = g.target_amount - g.current_amount
     if remaining <= 0:
-        return date.today()
-    today = date.today()
+        return client_today()
+    today = client_today()
     three_months_ago = today - timedelta(days=90)
     profit_90d = _tx_sum(db, user, "revenue", three_months_ago, today) - _tx_sum(db, user, "expense", three_months_ago, today)
     monthly_profit = profit_90d / 3
@@ -1461,14 +1551,84 @@ def _estimate_goal_completion(db: Session, user: User, g: Goal) -> Optional[date
     return today + timedelta(days=int(round(months_needed * 30.44)))
 
 
+def _goal_deadline_meta(g: Goal, user: User, today: date) -> dict:
+    """Everything about how a goal is tracking against its deadline, computed
+    against the user's own device date (client_today), not the server's."""
+    meta = {
+        "days_remaining": None, "days_elapsed": None, "is_overdue": False,
+        "pace_status": None, "required_daily_amount": None,
+        "alert_message": None, "alert_level": None,
+    }
+    remaining_amount = max(0.0, g.target_amount - g.current_amount)
+
+    if g.status == "completed":
+        meta["pace_status"] = "ahead"
+        return meta
+    if not g.deadline or g.status != "active":
+        return meta
+
+    days_remaining = (g.deadline - today).days
+    created = g.created_at.date() if g.created_at else today
+    total_days = (g.deadline - created).days
+    days_elapsed = (today - created).days
+    meta["days_remaining"] = days_remaining
+    meta["days_elapsed"] = max(0, days_elapsed)
+
+    if remaining_amount <= 0:
+        meta["pace_status"] = "ahead"
+        return meta
+
+    remind_from = g.remind_days_before if g.remind_days_before is not None else 7
+
+    if days_remaining < 0:
+        meta["is_overdue"] = True
+        meta["pace_status"] = "behind"
+        meta["alert_message"] = f"Overdue by {abs(days_remaining)} day(s) — the deadline was {g.deadline.isoformat()}."
+        meta["alert_level"] = "danger"
+        return meta
+
+    meta["required_daily_amount"] = remaining_amount / days_remaining if days_remaining > 0 else remaining_amount
+
+    if days_remaining == 0:
+        meta["alert_message"] = "Deadline is today!"
+        meta["alert_level"] = "danger"
+    elif days_remaining <= 3:
+        meta["alert_message"] = f"Only {days_remaining} day(s) left to reach this goal."
+        meta["alert_level"] = "danger"
+    elif days_remaining <= max(remind_from, 7):
+        meta["alert_message"] = f"{days_remaining} days left — the deadline is approaching."
+        meta["alert_level"] = "warning"
+
+    if total_days > 0:
+        expected_pct = min(100.0, (meta["days_elapsed"] / total_days) * 100)
+        actual_pct = min(100.0, (g.current_amount / g.target_amount * 100)) if g.target_amount else 0.0
+        if actual_pct + 1e-9 >= expected_pct:
+            meta["pace_status"] = "ahead" if actual_pct > expected_pct + 5 else "on_track"
+        else:
+            meta["pace_status"] = "behind"
+            if not meta["alert_message"]:
+                meta["alert_message"] = (
+                    f"Behind pace — save about {meta['required_daily_amount']:,.0f} {user.currency}/day to catch up."
+                )
+                meta["alert_level"] = "warning"
+
+    return meta
+
+
 def _goal_out(db: Session, user: User, g: Goal) -> GoalOut:
     pct = min(100.0, round((g.current_amount / g.target_amount * 100), 1)) if g.target_amount else 0.0
     remaining = max(0.0, g.target_amount - g.current_amount)
     est = _estimate_goal_completion(db, user, g)
+    meta = _goal_deadline_meta(g, user, client_today())
     return GoalOut(
         id=g.id, name=g.name, target_amount=g.target_amount, current_amount=g.current_amount,
-        deadline=g.deadline, status=g.status, progress_percent=pct, amount_remaining=remaining,
-        estimated_completion_date=est,
+        deadline=g.deadline, status=g.status, priority=g.priority or "medium",
+        remind_days_before=g.remind_days_before if g.remind_days_before is not None else 7,
+        progress_percent=pct, amount_remaining=remaining, estimated_completion_date=est,
+        days_remaining=meta["days_remaining"], days_elapsed=meta["days_elapsed"],
+        is_overdue=meta["is_overdue"], pace_status=meta["pace_status"],
+        required_daily_amount=meta["required_daily_amount"],
+        alert_message=meta["alert_message"], alert_level=meta["alert_level"],
     )
 
 
@@ -1483,6 +1643,7 @@ def create_goal(body: GoalIn, user: User = Depends(get_current_user), db: Sessio
     g = Goal(
         user_id=user.id, name=body.name.strip(), target_amount=body.target_amount,
         current_amount=body.current_amount, deadline=body.deadline,
+        priority=body.priority, remind_days_before=body.remind_days_before,
     )
     db.add(g)
     db.commit()
@@ -1517,6 +1678,10 @@ def update_goal(goal_id: int, body: GoalUpdateIn, user: User = Depends(get_curre
         g.current_amount = max(0.0, body.current_amount)
     if body.status is not None:
         g.status = body.status
+    if body.priority is not None:
+        g.priority = body.priority
+    if body.remind_days_before is not None:
+        g.remind_days_before = max(0, body.remind_days_before)
     if g.target_amount and g.current_amount >= g.target_amount and g.status == "active" and body.status is None:
         g.status = "completed"
         db.add(Notification(user_id=user.id, kind="success", message=f"Goal '{g.name}' reached! \U0001F389"))
@@ -1601,7 +1766,7 @@ def get_mission(user: User = Depends(get_current_user)):
     start, end = user.mission_start_date, user.mission_end_date
     if not start or not end or end <= start:
         return MissionOut(title=user.mission_title, start_date=start, end_date=end)
-    today = date.today()
+    today = client_today()
     total_days = (end - start).days
     days_completed = max(0, min(total_days, (today - start).days))
     days_remaining = max(0, (end - today).days)
@@ -1653,7 +1818,7 @@ def search_journal(q: str = Query(..., min_length=1), user: User = Depends(get_c
 
 @app.post("/journal", response_model=JournalOut)
 def create_journal(body: JournalIn, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
-    entry_date = body.date or date.today()
+    entry_date = body.date or client_today()
     existing = db.query(JournalEntry).filter(JournalEntry.user_id == user.id, JournalEntry.date == entry_date).first()
     if existing:
         existing.accomplished = body.accomplished
@@ -1749,7 +1914,7 @@ def _refresh_recurring_todos(db: Session, user: User):
     (e.g. 'Record today's transactions', 'Check hotspot uptime') showing up
     automatically each day instead of vanishing once the previous day's copy
     is completed."""
-    today = date.today()
+    today = client_today()
     recurring_rows = db.query(Todo).filter(Todo.user_id == user.id, Todo.recurring == True).order_by(Todo.created_at.asc()).all()  # noqa: E712
     seen = {}
     for t in recurring_rows:
@@ -1825,7 +1990,7 @@ def create_todo(body: TodoIn, user: User = Depends(get_current_user), db: Sessio
         _get_owned_business(db, user, body.business_id)
     t = Todo(
         user_id=user.id, title=body.title.strip(), notes=body.notes or "", priority=body.priority,
-        business_id=body.business_id, due_date=body.due_date or date.today(), recurring=body.recurring,
+        business_id=body.business_id, due_date=body.due_date or client_today(), recurring=body.recurring,
     )
     db.add(t)
     db.commit()
@@ -1882,7 +2047,7 @@ def delete_todo(todo_id: int, user: User = Depends(get_current_user), db: Sessio
 
 @app.get("/ai/todo-feedback")
 def ai_todo_feedback(user: User = Depends(get_current_user), db: Session = Depends(get_db)):
-    today = date.today()
+    today = client_today()
     open_todos = db.query(Todo).filter(
         Todo.user_id == user.id, Todo.status.in_(["pending", "in_progress"]), Todo.due_date <= today
     ).order_by(Todo.due_date.asc()).all()
@@ -1958,7 +2123,7 @@ def _compute_execution_score(db: Session, user: User, on_date: date):
     breakdown["businesses_updated"] = f"{engaged}/{len(active_businesses)}" if active_businesses else "0/0"
     business_engagement_ratio = (engaged / len(active_businesses)) if active_businesses else 1.0
 
-    if on_date == date.today():
+    if on_date == client_today():
         _refresh_recurring_todos(db, user)
     tasks_due_today = db.query(Todo).filter(Todo.user_id == user.id, Todo.due_date == today).all()
     tasks_total = len(tasks_due_today)
@@ -2006,7 +2171,7 @@ def _compute_execution_score(db: Session, user: User, on_date: date):
 
 @app.get("/execution-score/today", response_model=ExecutionScoreOut)
 def execution_score_today(user: User = Depends(get_current_user), db: Session = Depends(get_db)):
-    today = date.today()
+    today = client_today()
     score, breakdown, suggestions, tasks_total, tasks_completed = _compute_execution_score(db, user, today)
 
     existing = db.query(ExecutionScore).filter(ExecutionScore.user_id == user.id, ExecutionScore.date == today).first()
@@ -2034,14 +2199,14 @@ def execution_score_today(user: User = Depends(get_current_user), db: Session = 
 
 @app.get("/execution-score/history")
 def execution_score_history(days: int = 30, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
-    start = date.today() - timedelta(days=days - 1)
+    start = client_today() - timedelta(days=days - 1)
     rows = db.query(ExecutionScore).filter(ExecutionScore.user_id == user.id, ExecutionScore.date >= start).order_by(ExecutionScore.date.asc()).all()
     return [{"date": r.date.isoformat(), "score": r.score} for r in rows]
 
 
 @app.get("/daily-scores", response_model=List[DailyScoreOut])
 def list_daily_scores(days: int = Query(60, le=1000), user: User = Depends(get_current_user), db: Session = Depends(get_db)):
-    start = date.today() - timedelta(days=days - 1)
+    start = client_today() - timedelta(days=days - 1)
     rows = db.query(DailyScore).filter(DailyScore.user_id == user.id, DailyScore.date >= start).order_by(DailyScore.date.desc()).all()
     out = []
     for r in rows:
@@ -2070,7 +2235,7 @@ def _sum_business_tx(db, user, business_id, type_, start, end):
 
 @app.get("/business-empire")
 def business_empire(user: User = Depends(get_current_user), db: Session = Depends(get_db)):
-    today = date.today()
+    today = client_today()
     month_start = today.replace(day=1)
     last_month_end = month_start - timedelta(days=1)
     last_month_start = last_month_end.replace(day=1)
@@ -2117,7 +2282,7 @@ def business_empire(user: User = Depends(get_current_user), db: Session = Depend
 
 @app.get("/income-distribution")
 def income_distribution(days: int = 90, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
-    today = date.today()
+    today = client_today()
     start = today - timedelta(days=days - 1)
     businesses = db.query(Business).filter(Business.user_id == user.id).all()
     rows = []
@@ -2165,7 +2330,7 @@ def _recent_notification_exists(db, user, fragment: str, within_days: int = 1) -
 @app.post("/notifications/check")
 def run_smart_notifications(user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     created = []
-    today = date.today()
+    today = client_today()
 
     if _tx_sum(db, user, "revenue", today, today) == 0 and _tx_sum(db, user, "expense", today, today) == 0:
         if not _recent_notification_exists(db, user, "haven't logged anything today"):
@@ -2228,6 +2393,20 @@ def run_smart_notifications(user: User = Depends(get_current_user), db: Session 
         db.add(Notification(user_id=user.id, kind="info", message=msg))
         created.append(msg)
 
+    # Goal deadlines: overdue, closing in, or falling behind pace.
+    active_goals = db.query(Goal).filter(Goal.user_id == user.id, Goal.status == "active", Goal.deadline.isnot(None)).all()
+    for g in active_goals:
+        meta = _goal_deadline_meta(g, user, today)
+        if not meta["alert_message"]:
+            continue
+        frag = f"Goal '{g.name}'"
+        within = 1 if meta["alert_level"] == "danger" else 3
+        if not _recent_notification_exists(db, user, frag, within_days=within):
+            msg = f"Goal '{g.name}': {meta['alert_message']}"
+            kind = "warning" if meta["alert_level"] in ("danger", "warning") else "info"
+            db.add(Notification(user_id=user.id, kind=kind, message=msg))
+            created.append(msg)
+
     db.commit()
     return {"created": created}
 
@@ -2249,7 +2428,7 @@ def _tx_sum(db, user, type_, start=None, end=None):
 
 @app.get("/dashboard")
 def dashboard(user: User = Depends(get_current_user), db: Session = Depends(get_db)):
-    today = date.today()
+    today = client_today()
     month_start = today.replace(day=1)
     last_month_end = month_start - timedelta(days=1)
     last_month_start = last_month_end.replace(day=1)
@@ -2274,7 +2453,11 @@ def dashboard(user: User = Depends(get_current_user), db: Session = Depends(get_
     net_worth = savings_balance + total_assets + total_investments
 
     business_count = db.query(Business).filter(Business.user_id == user.id).count()
-    active_goals = db.query(Goal).filter(Goal.user_id == user.id, Goal.status == "active").count()
+    active_goals_rows = db.query(Goal).filter(Goal.user_id == user.id, Goal.status == "active").all()
+    active_goals = len(active_goals_rows)
+    goals_needing_attention = sum(
+        1 for g in active_goals_rows if _goal_deadline_meta(g, user, today)["alert_level"] in ("danger", "warning")
+    )
 
     quote = MOTIVATION_QUOTES[today.toordinal() % len(MOTIVATION_QUOTES)]
     priorities = [
@@ -2296,6 +2479,7 @@ def dashboard(user: User = Depends(get_current_user), db: Session = Depends(get_
         "net_worth": net_worth,
         "business_count": business_count,
         "active_goals": active_goals,
+        "goals_needing_attention": goals_needing_attention,
         "motivation_quote": quote,
         "todays_priorities": priorities,
         "mission_objective": "Build Financial Freedom",
@@ -2304,7 +2488,7 @@ def dashboard(user: User = Depends(get_current_user), db: Session = Depends(get_
 
 @app.get("/dashboard/charts")
 def dashboard_charts(days: int = 30, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
-    today = date.today()
+    today = client_today()
     start = today - timedelta(days=days - 1)
     labels, revenue, expense, profit = [], [], [], []
 
@@ -2350,7 +2534,7 @@ def dashboard_charts(days: int = 30, user: User = Depends(get_current_user), db:
 @app.get("/analytics/forecast")
 def analytics_forecast(months_history: int = 6, months_forward: int = 12,
                         user: User = Depends(get_current_user), db: Session = Depends(get_db)):
-    today = date.today()
+    today = client_today()
     history = []
     cursor = today.replace(day=1)
     for i in range(months_history - 1, -1, -1):
@@ -2401,7 +2585,7 @@ def analytics_forecast(months_history: int = 6, months_forward: int = 12,
 
 def _rule_based_insights(db: Session, user: User) -> List[str]:
     insights = []
-    today = date.today()
+    today = client_today()
     month_start = today.replace(day=1)
 
     businesses = db.query(Business).filter(Business.user_id == user.id).all()
@@ -2461,7 +2645,7 @@ def _build_full_system_snapshot(db: Session, user: User, light: bool = False) ->
     recommendations) so responses are always grounded in the user's real,
     current data, including their mission timeline and full savings history,
     rather than guesses."""
-    today = date.today()
+    today = client_today()
     month_start = today.replace(day=1)
 
     businesses = db.query(Business).filter(Business.user_id == user.id).all()
@@ -2480,8 +2664,11 @@ def _build_full_system_snapshot(db: Session, user: User, light: bool = False) ->
 
     goals = db.query(Goal).filter(Goal.user_id == user.id).all()
     goal_snapshot = [
-        {"name": g.name, "target": g.target_amount, "current": g.current_amount, "status": g.status,
-         "deadline": g.deadline.isoformat() if g.deadline else None}
+        {
+            "name": g.name, "target": g.target_amount, "current": g.current_amount, "status": g.status,
+            "priority": g.priority, "deadline": g.deadline.isoformat() if g.deadline else None,
+            "days_remaining": _goal_deadline_meta(g, user, today)["days_remaining"],
+        }
         for g in goals
     ]
 
@@ -2719,7 +2906,7 @@ def _generate_business_recommendation(db: Session, user: User, on_date: date) ->
 
 @app.get("/business-recommendations/today", response_model=BusinessRecommendationOut)
 def business_recommendation_today(force: bool = False, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
-    today = date.today()
+    today = client_today()
     existing = db.query(BusinessRecommendation).filter(BusinessRecommendation.user_id == user.id, BusinessRecommendation.date == today).first()
     if existing and not force:
         return _biz_rec_out(existing)
@@ -2979,7 +3166,7 @@ def clear_ai_chat_history(user: User = Depends(get_current_user), db: Session = 
 
 @app.get("/reports/summary")
 def reports_summary(period: str = "monthly", user: User = Depends(get_current_user), db: Session = Depends(get_db)):
-    today = date.today()
+    today = client_today()
     if period == "daily":
         start = today
     elif period == "weekly":
@@ -3016,7 +3203,7 @@ def reports_summary(period: str = "monthly", user: User = Depends(get_current_us
 
 @app.get("/reviews/weekly")
 def weekly_review(user: User = Depends(get_current_user), db: Session = Depends(get_db)):
-    today = date.today()
+    today = client_today()
     week_start = today - timedelta(days=today.weekday())
     revenue = _tx_sum(db, user, "revenue", week_start, today)
     expense = _tx_sum(db, user, "expense", week_start, today)
@@ -3067,7 +3254,7 @@ def weekly_review(user: User = Depends(get_current_user), db: Session = Depends(
 
 @app.get("/reviews/monthly")
 def monthly_review(user: User = Depends(get_current_user), db: Session = Depends(get_db)):
-    today = date.today()
+    today = client_today()
     month_start = today.replace(day=1)
     last_month_end = month_start - timedelta(days=1)
     last_month_start = last_month_end.replace(day=1)
