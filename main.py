@@ -272,6 +272,7 @@ class User(Base):
     execution_scores = relationship("ExecutionScore", back_populates="owner", cascade="all, delete-orphan")
     todos = relationship("Todo", back_populates="owner", cascade="all, delete-orphan")
     daily_scores = relationship("DailyScore", back_populates="owner", cascade="all, delete-orphan")
+    daily_records = relationship("DailyRecord", back_populates="owner", cascade="all, delete-orphan")
     chat_messages = relationship("ChatMessage", back_populates="owner", cascade="all, delete-orphan")
     business_recommendations = relationship("BusinessRecommendation", back_populates="owner", cascade="all, delete-orphan")
 
@@ -303,6 +304,23 @@ class Transaction(Base):
     created_at = Column(DateTime, default=utcnow)
 
     owner = relationship("User", back_populates="transactions")
+
+
+class DailyRecord(Base):
+    """Personal day-to-day earnings and expenses — deliberately NOT linked to
+    any Business. This powers the standalone 'Daily Tracker' page, which is
+    for personal/household cash flow rather than business bookkeeping."""
+    __tablename__ = "daily_records"
+    id = Column(Integer, primary_key=True, index=True)
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=False, index=True)
+    type = Column(String, nullable=False)  # earning | expense
+    amount = Column(Float, nullable=False)
+    category = Column(String, default="Other")
+    description = Column(String, default="")
+    date = Column(Date, default=lambda: client_today(), index=True)
+    created_at = Column(DateTime, default=utcnow)
+
+    owner = relationship("User", back_populates="daily_records")
 
 
 class Savings(Base):
@@ -716,6 +734,82 @@ class TransactionOut(BaseModel):
 
     class Config:
         from_attributes = True
+
+
+class DailyRecordIn(BaseModel):
+    type: str
+    amount: float
+    category: str = "Other"
+    description: str = ""
+    date: Optional[datetime.date] = None
+
+    @field_validator("type")
+    @classmethod
+    def type_valid(cls, v):
+        if v not in ("earning", "expense"):
+            raise ValueError("type must be 'earning' or 'expense'")
+        return v
+
+    @field_validator("amount")
+    @classmethod
+    def amount_positive(cls, v):
+        if v is None or v <= 0:
+            raise ValueError("amount must be greater than 0")
+        return v
+
+
+class DailyRecordUpdateIn(BaseModel):
+    type: Optional[str] = None
+    amount: Optional[float] = None
+    category: Optional[str] = None
+    description: Optional[str] = None
+    date: Optional[datetime.date] = None
+
+    @field_validator("type")
+    @classmethod
+    def type_valid(cls, v):
+        if v is not None and v not in ("earning", "expense"):
+            raise ValueError("type must be 'earning' or 'expense'")
+        return v
+
+
+class DailyRecordOut(BaseModel):
+    id: int
+    type: str
+    amount: float
+    category: str
+    description: str
+    date: date
+
+    class Config:
+        from_attributes = True
+
+
+class DailyDashboardOut(BaseModel):
+    today_earnings: float
+    today_expenses: float
+    today_net: float
+    week_earnings: float
+    week_expenses: float
+    week_net: float
+    month_earnings: float
+    month_expenses: float
+    month_net: float
+    all_time_earnings: float
+    all_time_expenses: float
+    all_time_net: float
+    record_count: int
+    recent: List[DailyRecordOut]
+
+
+class DailyReportOut(BaseModel):
+    period: str
+    start_date: date
+    end_date: date
+    total_earnings: float
+    total_expenses: float
+    net: float
+    records: List[DailyRecordOut]
 
 
 class SavingsIn(BaseModel):
@@ -1286,6 +1380,139 @@ def delete_transaction(tx_id: int, user: User = Depends(get_current_user), db: S
     db.delete(tx)
     db.commit()
     return {"ok": True}
+
+
+# ----------------------------------------------------------------------------
+# Daily Tracker — personal day-to-day earnings/expenses, deliberately kept
+# separate from Business/Transaction so they never touch business books.
+# Expenses reduce earnings automatically wherever a net figure is shown
+# (dashboard, reports) — nothing here is ever attached to a business_id.
+# ----------------------------------------------------------------------------
+
+def _daily_sum(db: Session, user: User, type_: str, start: Optional[date] = None, end: Optional[date] = None) -> float:
+    q = db.query(func.coalesce(func.sum(DailyRecord.amount), 0.0)).filter(
+        DailyRecord.user_id == user.id, DailyRecord.type == type_
+    )
+    if start:
+        q = q.filter(DailyRecord.date >= start)
+    if end:
+        q = q.filter(DailyRecord.date <= end)
+    return float(q.scalar() or 0.0)
+
+
+def _daily_period_bounds(period: str, today: date):
+    if period == "weekly":
+        start = today - timedelta(days=today.weekday())
+    elif period == "monthly":
+        start = today.replace(day=1)
+    else:
+        period = "monthly"
+        start = today.replace(day=1)
+    return period, start, today
+
+
+@app.get("/daily-records", response_model=List[DailyRecordOut])
+def list_daily_records(
+    type: Optional[str] = None,
+    start_date: Optional[date] = None,
+    end_date: Optional[date] = None,
+    limit: int = Query(2000, le=5000),
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    q = db.query(DailyRecord).filter(DailyRecord.user_id == user.id)
+    if type:
+        q = q.filter(DailyRecord.type == type)
+    if start_date:
+        q = q.filter(DailyRecord.date >= start_date)
+    if end_date:
+        q = q.filter(DailyRecord.date <= end_date)
+    return q.order_by(DailyRecord.date.desc(), DailyRecord.id.desc()).limit(limit).all()
+
+
+@app.post("/daily-records", response_model=DailyRecordOut)
+def create_daily_record(body: DailyRecordIn, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    rec = DailyRecord(
+        user_id=user.id, type=body.type, amount=body.amount,
+        category=body.category or "Other", description=body.description or "",
+        date=body.date or client_today(),
+    )
+    db.add(rec)
+    db.commit()
+    db.refresh(rec)
+    return rec
+
+
+@app.put("/daily-records/{rec_id}", response_model=DailyRecordOut)
+def update_daily_record(rec_id: int, body: DailyRecordUpdateIn, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    rec = db.query(DailyRecord).filter(DailyRecord.id == rec_id, DailyRecord.user_id == user.id).first()
+    if not rec:
+        raise HTTPException(status_code=404, detail="Daily record not found.")
+    for field in ("type", "amount", "category", "description", "date"):
+        val = getattr(body, field)
+        if val is not None:
+            setattr(rec, field, val)
+    db.commit()
+    db.refresh(rec)
+    return rec
+
+
+@app.delete("/daily-records/{rec_id}")
+def delete_daily_record(rec_id: int, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    rec = db.query(DailyRecord).filter(DailyRecord.id == rec_id, DailyRecord.user_id == user.id).first()
+    if not rec:
+        raise HTTPException(status_code=404, detail="Daily record not found.")
+    db.delete(rec)
+    db.commit()
+    return {"ok": True}
+
+
+@app.get("/daily-records/dashboard", response_model=DailyDashboardOut)
+def daily_records_dashboard(user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    today = client_today()
+    week_start = today - timedelta(days=today.weekday())
+    month_start = today.replace(day=1)
+
+    today_earnings = _daily_sum(db, user, "earning", today, today)
+    today_expenses = _daily_sum(db, user, "expense", today, today)
+    week_earnings = _daily_sum(db, user, "earning", week_start, today)
+    week_expenses = _daily_sum(db, user, "expense", week_start, today)
+    month_earnings = _daily_sum(db, user, "earning", month_start, today)
+    month_expenses = _daily_sum(db, user, "expense", month_start, today)
+    all_earnings = _daily_sum(db, user, "earning")
+    all_expenses = _daily_sum(db, user, "expense")
+
+    record_count = db.query(func.count(DailyRecord.id)).filter(DailyRecord.user_id == user.id).scalar() or 0
+    recent = db.query(DailyRecord).filter(DailyRecord.user_id == user.id).order_by(
+        DailyRecord.date.desc(), DailyRecord.id.desc()
+    ).limit(10).all()
+
+    return DailyDashboardOut(
+        today_earnings=today_earnings, today_expenses=today_expenses, today_net=today_earnings - today_expenses,
+        week_earnings=week_earnings, week_expenses=week_expenses, week_net=week_earnings - week_expenses,
+        month_earnings=month_earnings, month_expenses=month_expenses, month_net=month_earnings - month_expenses,
+        all_time_earnings=all_earnings, all_time_expenses=all_expenses, all_time_net=all_earnings - all_expenses,
+        record_count=record_count, recent=recent,
+    )
+
+
+@app.get("/daily-records/report", response_model=DailyReportOut)
+def daily_records_report(period: str = "weekly", user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    today = client_today()
+    period, start, end = _daily_period_bounds(period, today)
+
+    records = db.query(DailyRecord).filter(
+        DailyRecord.user_id == user.id, DailyRecord.date >= start, DailyRecord.date <= end
+    ).order_by(DailyRecord.date.desc(), DailyRecord.id.desc()).all()
+
+    total_earnings = sum(r.amount for r in records if r.type == "earning")
+    total_expenses = sum(r.amount for r in records if r.type == "expense")
+
+    return DailyReportOut(
+        period=period, start_date=start, end_date=end,
+        total_earnings=total_earnings, total_expenses=total_expenses, net=total_earnings - total_expenses,
+        records=records,
+    )
 
 
 # ----------------------------------------------------------------------------
