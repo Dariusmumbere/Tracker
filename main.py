@@ -3525,3 +3525,6 @@ def monthly_review(user: User = Depends(get_current_user), db: Session = Depends
         "month_tasks_total": month_tasks_total,
         "month_tasks_done": month_tasks_done,
     }
+    @app.get("/api/health")
+    def health():
+        return {"status": "ok", "time": dt.datetime.utcnow().isoformat()}
