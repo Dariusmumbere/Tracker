@@ -257,6 +257,11 @@ class User(Base):
     mission_end_date = Column(Date, nullable=True)
     target_hotspot_count = Column(Integer, default=7)
 
+    # Smart Daily Tracker: personal daily spending ceiling. Used to grade the
+    # daily score and to trigger caution/exceeded notifications. Defaults to
+    # 4000 in the user's own currency; editable from Settings.
+    daily_expense_limit = Column(Float, default=4000.0)
+
     businesses = relationship("Business", back_populates="owner", cascade="all, delete-orphan")
     transactions = relationship("Transaction", back_populates="owner", cascade="all, delete-orphan")
     savings = relationship("Savings", back_populates="owner", cascade="all, delete-orphan")
@@ -275,6 +280,8 @@ class User(Base):
     daily_records = relationship("DailyRecord", back_populates="owner", cascade="all, delete-orphan")
     chat_messages = relationship("ChatMessage", back_populates="owner", cascade="all, delete-orphan")
     business_recommendations = relationship("BusinessRecommendation", back_populates="owner", cascade="all, delete-orphan")
+    goal_contributions = relationship("GoalContribution", back_populates="owner", cascade="all, delete-orphan")
+    tracker_scores = relationship("DailyTrackerScore", back_populates="owner", cascade="all, delete-orphan")
 
 
 class Business(Base):
@@ -399,6 +406,26 @@ class Goal(Base):
     created_at = Column(DateTime, default=utcnow)
 
     owner = relationship("User", back_populates="goals")
+    contributions = relationship("GoalContribution", back_populates="goal", cascade="all, delete-orphan")
+
+
+class GoalContribution(Base):
+    """A single date-stamped deposit toward a Goal. Written automatically
+    whenever a goal's current_amount increases (see update_goal /
+    contribute_to_goal below), so 'funded a goal today' can be answered
+    without the frontend having to say anything special — a plain edit
+    that raises the saved amount already counts."""
+    __tablename__ = "goal_contributions"
+    id = Column(Integer, primary_key=True, index=True)
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=False, index=True)
+    goal_id = Column(Integer, ForeignKey("goals.id"), nullable=False, index=True)
+    amount = Column(Float, nullable=False)
+    note = Column(String, default="")
+    date = Column(Date, default=lambda: client_today(), index=True)
+    created_at = Column(DateTime, default=utcnow)
+
+    owner = relationship("User", back_populates="goal_contributions")
+    goal = relationship("Goal", back_populates="contributions")
 
 
 class Principle(Base):
@@ -516,6 +543,24 @@ class DailyScore(Base):
     owner = relationship("User", back_populates="daily_scores")
 
 
+class DailyTrackerScore(Base):
+    """One row per user per day — the Smart Daily Tracker's own score,
+    separate from the business-focused ExecutionScore/DailyScore above.
+    Graded on: staying within the daily spending limit, completing tasks
+    due that day, logging at least one Daily Tracker record, filling the
+    journal, and putting funds toward a goal."""
+    __tablename__ = "daily_tracker_scores"
+    id = Column(Integer, primary_key=True, index=True)
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=False, index=True)
+    date = Column(Date, default=lambda: client_today(), index=True)
+    score = Column(Float, default=0)
+    within_limit = Column(Boolean, default=True)
+    breakdown_json = Column(String, default="{}")
+    created_at = Column(DateTime, default=utcnow)
+
+    owner = relationship("User", back_populates="tracker_scores")
+
+
 class ChatMessage(Base):
     """Persisted AI Advisor chat history, per user."""
     __tablename__ = "chat_messages"
@@ -563,6 +608,12 @@ try:
         conn.exec_driver_sql("ALTER TABLE goals ADD COLUMN IF NOT EXISTS remind_days_before INTEGER DEFAULT 7")
 except Exception as _mig_err:
     logger.warning("Goal table migration skipped/failed (non-fatal): %s", _mig_err)
+
+try:
+    with engine.begin() as conn:
+        conn.exec_driver_sql("ALTER TABLE users ADD COLUMN IF NOT EXISTS daily_expense_limit FLOAT DEFAULT 4000")
+except Exception as _mig_err:
+    logger.warning("User table migration skipped/failed (non-fatal): %s", _mig_err)
 
 
 def get_db():
@@ -655,6 +706,7 @@ class UserOut(BaseModel):
     full_name: str
     email: str
     currency: str
+    daily_expense_limit: float = 4000.0
 
     class Config:
         from_attributes = True
@@ -670,6 +722,14 @@ class MeUpdateIn(BaseModel):
     full_name: Optional[str] = None
     currency: Optional[str] = None
     password: Optional[str] = None
+    daily_expense_limit: Optional[float] = None
+
+    @field_validator("daily_expense_limit")
+    @classmethod
+    def limit_non_negative(cls, v):
+        if v is not None and v < 0:
+            raise ValueError("daily_expense_limit cannot be negative")
+        return v
 
 
 class BusinessIn(BaseModel):
@@ -800,6 +860,16 @@ class DailyDashboardOut(BaseModel):
     all_time_net: float
     record_count: int
     recent: List[DailyRecordOut]
+    # Smart Daily Tracker additions
+    daily_limit: float = 0.0
+    daily_limit_status: str = "unset"          # unset | ok | caution | exceeded
+    daily_limit_remaining: float = 0.0
+    daily_limit_percent_used: float = 0.0
+    daily_limit_message: str = ""
+    tracker_score: float = 0.0
+    tracker_breakdown: dict = {}
+    tracker_cautions: List[str] = []
+    tracker_suggestions: List[str] = []
 
 
 class DailyReportOut(BaseModel):
@@ -810,6 +880,48 @@ class DailyReportOut(BaseModel):
     total_expenses: float
     net: float
     records: List[DailyRecordOut]
+
+
+class DailyLimitStatusOut(BaseModel):
+    date: date
+    limit: float
+    spent: float
+    remaining: float
+    percent_used: float
+    status: str  # unset | ok | caution | exceeded
+    message: str
+
+
+class DailyTrackerScoreOut(BaseModel):
+    date: date
+    score: float
+    breakdown: dict
+    cautions: List[str]
+    suggestions: List[str]
+
+
+class GoalContributeIn(BaseModel):
+    amount: float
+    note: str = ""
+    date: Optional[date] = None
+
+    @field_validator("amount")
+    @classmethod
+    def amount_positive(cls, v):
+        if v is None or v <= 0:
+            raise ValueError("amount must be greater than 0")
+        return v
+
+
+class GoalContributionOut(BaseModel):
+    id: int
+    goal_id: int
+    amount: float
+    note: str
+    date: date
+
+    class Config:
+        from_attributes = True
 
 
 class SavingsIn(BaseModel):
@@ -1265,6 +1377,8 @@ def update_me(body: MeUpdateIn, user: User = Depends(get_current_user), db: Sess
         user.full_name = body.full_name.strip()
     if body.currency:
         user.currency = body.currency if body.currency in CURRENCIES else user.currency
+    if body.daily_expense_limit is not None:
+        user.daily_expense_limit = body.daily_expense_limit
     if body.password:
         if len(body.password) < 6:
             raise HTTPException(status_code=400, detail="Password must be at least 6 characters.")
@@ -1411,6 +1525,108 @@ def _daily_period_bounds(period: str, today: date):
     return period, start, today
 
 
+# ----------------------------------------------------------------------------
+# Smart Daily Tracker — spending-limit control + the tracker's own score.
+# Kept deliberately separate from the business ExecutionScore: this one
+# grades the *personal* daily routine (Daily Tracker records, tasks,
+# journal, goal funding), not business bookkeeping.
+# ----------------------------------------------------------------------------
+
+def _daily_limit_status(db: Session, user: User, on_date: date) -> dict:
+    limit = float(user.daily_expense_limit or 0)
+    spent = _daily_sum(db, user, "expense", on_date, on_date)
+    remaining = limit - spent
+    percent = round((spent / limit) * 100, 1) if limit > 0 else 0.0
+
+    if limit <= 0:
+        status_, message = "unset", "No daily spending limit set — add one in Settings to get spending cautions."
+    elif spent > limit:
+        status_ = "exceeded"
+        message = f"You're {spent - limit:,.0f} {user.currency} over today's {limit:,.0f} {user.currency} limit."
+    elif spent >= limit * 0.8:
+        status_ = "caution"
+        message = f"Heads up — you've used {percent:.0f}% of today's {limit:,.0f} {user.currency} limit."
+    else:
+        status_ = "ok"
+        message = f"{remaining:,.0f} {user.currency} left of today's {limit:,.0f} {user.currency} limit."
+
+    return {
+        "date": on_date, "limit": limit, "spent": spent, "remaining": remaining,
+        "percent_used": percent, "status": status_, "message": message,
+    }
+
+
+def _compute_daily_tracker_score(db: Session, user: User, on_date: date):
+    """Score the day's personal routine out of 100:
+    - 30 pts: stayed within the daily spending limit (full credit if no limit is set)
+    - 25 pts: tasks due today completed (proportional)
+    - 20 pts: at least one Daily Tracker record logged today
+    - 15 pts: today's journal entry filled in
+    - 10 pts: funds added to any goal today
+    """
+    limit_info = _daily_limit_status(db, user, on_date)
+    within_limit = limit_info["status"] in ("unset", "ok")
+    # "caution" (80%+ but not yet over) still earns partial credit so a
+    # careful-but-not-perfect day isn't scored the same as blowing the limit.
+    limit_credit = 1.0 if limit_info["status"] in ("unset", "ok") else (0.5 if limit_info["status"] == "caution" else 0.0)
+
+    if on_date == client_today():
+        _refresh_recurring_todos(db, user)
+    tasks_due = db.query(Todo).filter(Todo.user_id == user.id, Todo.due_date == on_date).all()
+    tasks_total = len(tasks_due)
+    tasks_completed = len([t for t in tasks_due if t.status == "completed"])
+    task_ratio = (tasks_completed / tasks_total) if tasks_total else 1.0
+
+    records_today = db.query(func.count(DailyRecord.id)).filter(
+        DailyRecord.user_id == user.id, DailyRecord.date == on_date).scalar() or 0
+    records_added = records_today > 0
+
+    journal_today = db.query(JournalEntry).filter(JournalEntry.user_id == user.id, JournalEntry.date == on_date).first()
+    journal_done = bool(journal_today)
+
+    goal_contrib_today = db.query(GoalContribution).filter(
+        GoalContribution.user_id == user.id, GoalContribution.date == on_date).first()
+    goal_funded = bool(goal_contrib_today)
+
+    weights = {"within_limit": 30, "tasks_completed": 25, "records_added": 20, "journal_completed": 15, "goal_funded": 10}
+    score = 0.0
+    score += weights["within_limit"] * limit_credit
+    score += weights["tasks_completed"] * task_ratio
+    score += weights["records_added"] if records_added else 0
+    score += weights["journal_completed"] if journal_done else 0
+    score += weights["goal_funded"] if goal_funded else 0
+    score = round(min(100.0, score), 1)
+
+    breakdown = {
+        "within_daily_limit": within_limit,
+        "daily_limit_status": limit_info["status"],
+        "today_expenses": limit_info["spent"],
+        "daily_limit": limit_info["limit"],
+        "tasks_completed": f"{tasks_completed}/{tasks_total}" if tasks_total else "0/0",
+        "daily_records_added": records_added,
+        "journal_completed": journal_done,
+        "goal_funded": goal_funded,
+    }
+
+    cautions = []
+    if limit_info["status"] in ("caution", "exceeded"):
+        cautions.append(limit_info["message"])
+
+    suggestions = []
+    if not records_added:
+        suggestions.append("Log at least one earning or expense in the Daily Tracker today.")
+    if tasks_total and tasks_completed < tasks_total:
+        suggestions.append(f"Finish {tasks_total - tasks_completed} more task(s) due today.")
+    if not journal_done:
+        suggestions.append("Fill in today's journal entry — even a couple of lines counts.")
+    if not goal_funded:
+        suggestions.append("Put something, even small, toward one of your goals today.")
+    if not suggestions and within_limit:
+        suggestions.append("Great discipline today — you're on track everywhere.")
+
+    return score, breakdown, cautions, suggestions
+
+
 @app.get("/daily-records", response_model=List[DailyRecordOut])
 def list_daily_records(
     type: Optional[str] = None,
@@ -1487,13 +1703,59 @@ def daily_records_dashboard(user: User = Depends(get_current_user), db: Session 
         DailyRecord.date.desc(), DailyRecord.id.desc()
     ).limit(10).all()
 
+    limit_info = _daily_limit_status(db, user, today)
+    score, breakdown, cautions, suggestions = _compute_daily_tracker_score(db, user, today)
+    _persist_daily_tracker_score(db, user, today, score, breakdown)
+
     return DailyDashboardOut(
         today_earnings=today_earnings, today_expenses=today_expenses, today_net=today_earnings - today_expenses,
         week_earnings=week_earnings, week_expenses=week_expenses, week_net=week_earnings - week_expenses,
         month_earnings=month_earnings, month_expenses=month_expenses, month_net=month_earnings - month_expenses,
         all_time_earnings=all_earnings, all_time_expenses=all_expenses, all_time_net=all_earnings - all_expenses,
         record_count=record_count, recent=recent,
+        daily_limit=limit_info["limit"], daily_limit_status=limit_info["status"],
+        daily_limit_remaining=limit_info["remaining"], daily_limit_percent_used=limit_info["percent_used"],
+        daily_limit_message=limit_info["message"],
+        tracker_score=score, tracker_breakdown=breakdown, tracker_cautions=cautions, tracker_suggestions=suggestions,
     )
+
+
+def _persist_daily_tracker_score(db: Session, user: User, on_date: date, score: float, breakdown: dict):
+    existing = db.query(DailyTrackerScore).filter(
+        DailyTrackerScore.user_id == user.id, DailyTrackerScore.date == on_date).first()
+    if existing:
+        existing.score = score
+        existing.within_limit = bool(breakdown.get("within_daily_limit", True))
+        existing.breakdown_json = json.dumps(breakdown)
+    else:
+        db.add(DailyTrackerScore(
+            user_id=user.id, date=on_date, score=score,
+            within_limit=bool(breakdown.get("within_daily_limit", True)),
+            breakdown_json=json.dumps(breakdown),
+        ))
+    db.commit()
+
+
+@app.get("/daily-records/limit-status", response_model=DailyLimitStatusOut)
+def daily_limit_status(user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    return DailyLimitStatusOut(**_daily_limit_status(db, user, client_today()))
+
+
+@app.get("/daily-tracker/score", response_model=DailyTrackerScoreOut)
+def daily_tracker_score(user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    today = client_today()
+    score, breakdown, cautions, suggestions = _compute_daily_tracker_score(db, user, today)
+    _persist_daily_tracker_score(db, user, today, score, breakdown)
+    return DailyTrackerScoreOut(date=today, score=score, breakdown=breakdown, cautions=cautions, suggestions=suggestions)
+
+
+@app.get("/daily-tracker/score/history")
+def daily_tracker_score_history(days: int = Query(30, le=1000), user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    start = client_today() - timedelta(days=days - 1)
+    rows = db.query(DailyTrackerScore).filter(
+        DailyTrackerScore.user_id == user.id, DailyTrackerScore.date >= start
+    ).order_by(DailyTrackerScore.date.asc()).all()
+    return [{"date": r.date.isoformat(), "score": r.score, "within_limit": r.within_limit} for r in rows]
 
 
 @app.get("/daily-records/report", response_model=DailyReportOut)
@@ -1902,7 +2164,14 @@ def update_goal(goal_id: int, body: GoalUpdateIn, user: User = Depends(get_curre
     if body.deadline is not None:
         g.deadline = body.deadline
     if body.current_amount is not None:
-        g.current_amount = max(0.0, body.current_amount)
+        new_amount = max(0.0, body.current_amount)
+        delta = new_amount - (g.current_amount or 0.0)
+        g.current_amount = new_amount
+        # Any increase counts as "funds added to this goal today" for the
+        # Smart Daily Tracker score — logged automatically so the existing
+        # "Update progress" flow needs no changes on the frontend.
+        if delta > 0:
+            db.add(GoalContribution(user_id=user.id, goal_id=g.id, amount=delta, date=client_today()))
     if body.status is not None:
         g.status = body.status
     if body.priority is not None:
@@ -1925,6 +2194,34 @@ def delete_goal(goal_id: int, user: User = Depends(get_current_user), db: Sessio
     db.delete(g)
     db.commit()
     return {"ok": True}
+
+
+@app.post("/goals/{goal_id}/contribute", response_model=GoalOut)
+def contribute_to_goal(goal_id: int, body: GoalContributeIn, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    """Add funds to a goal as an explicit, date-stamped deposit (as opposed
+    to overwriting current_amount directly via PUT /goals/{id})."""
+    g = db.query(Goal).filter(Goal.id == goal_id, Goal.user_id == user.id).first()
+    if not g:
+        raise HTTPException(status_code=404, detail=f"Goal {goal_id} not found for this account.")
+    contrib_date = body.date or client_today()
+    db.add(GoalContribution(user_id=user.id, goal_id=g.id, amount=body.amount, note=body.note or "", date=contrib_date))
+    g.current_amount = (g.current_amount or 0.0) + body.amount
+    if g.target_amount and g.current_amount >= g.target_amount and g.status == "active":
+        g.status = "completed"
+        db.add(Notification(user_id=user.id, kind="success", message=f"Goal '{g.name}' reached! \U0001F389"))
+    db.commit()
+    db.refresh(g)
+    return _goal_out(db, user, g)
+
+
+@app.get("/goals/{goal_id}/contributions", response_model=List[GoalContributionOut])
+def list_goal_contributions(goal_id: int, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    g = db.query(Goal).filter(Goal.id == goal_id, Goal.user_id == user.id).first()
+    if not g:
+        raise HTTPException(status_code=404, detail=f"Goal {goal_id} not found for this account.")
+    return db.query(GoalContribution).filter(
+        GoalContribution.goal_id == goal_id, GoalContribution.user_id == user.id
+    ).order_by(GoalContribution.date.desc(), GoalContribution.id.desc()).all()
 
 
 # ----------------------------------------------------------------------------
@@ -2565,6 +2862,23 @@ def run_smart_notifications(user: User = Depends(get_current_user), db: Session 
             db.add(Notification(user_id=user.id, kind="warning", message=msg))
             created.append(msg)
 
+    # Smart Daily Tracker: caution or hard warning once today's personal
+    # spending gets close to / exceeds the user's daily limit.
+    limit_info = _daily_limit_status(db, user, today)
+    if limit_info["status"] in ("caution", "exceeded"):
+        frag = "daily spending limit"
+        within = 1 if limit_info["status"] == "exceeded" else 1
+        if not _recent_notification_exists(db, user, frag, within_days=within):
+            kind = "warning" if limit_info["status"] == "exceeded" else "info"
+            db.add(Notification(user_id=user.id, kind=kind, message=f"Daily spending limit: {limit_info['message']}"))
+            created.append(limit_info["message"])
+
+    if not db.query(DailyRecord).filter(DailyRecord.user_id == user.id, DailyRecord.date == today).first():
+        if not _recent_notification_exists(db, user, "haven't added anything to your Daily Tracker"):
+            msg = "You haven't added anything to your Daily Tracker today — log an earning or expense."
+            db.add(Notification(user_id=user.id, kind="info", message=msg))
+            created.append(msg)
+
     open_tasks_today = db.query(Todo).filter(Todo.user_id == user.id, Todo.due_date == today, Todo.status.in_(["pending", "in_progress"])).count()
     if open_tasks_today > 0 and not _recent_notification_exists(db, user, "task(s) due today still open"):
         msg = f"You have {open_tasks_today} task(s) due today still open — check your Todo list."
@@ -2653,6 +2967,39 @@ def _tx_sum(db, user, type_, start=None, end=None):
     return float(q.scalar() or 0.0)
 
 
+def _generate_motivation_quote(user: User, today: date) -> tuple:
+    """A short, freshly AI-generated motivational line shown every time the
+    app is opened (the Dashboard, which is what App.goSection('dashboard')
+    loads on every login/reload, always renders whatever comes back here).
+    Falls back to the curated, deterministic rotation if Groq is
+    unavailable or unset, so the app never shows a blank quote."""
+    fallback = MOTIVATION_QUOTES[today.toordinal() % len(MOTIVATION_QUOTES)]
+    prompt = (
+        f"Write ONE short, original, first-time motivational quote (max 22 words) for {user.full_name}, "
+        f"who is working on '{user.mission_title}' toward financial freedom, tracking money in {user.currency}. "
+        "Make it feel fresh and specific to discipline, consistency, or small daily financial habits — not generic. "
+        "Return ONLY the quote itself: no quotation marks, no author attribution, no preamble, no extra lines."
+    )
+    text = _call_groq(prompt, context="daily_quote")
+    if text:
+        quote = text.strip().strip('"').strip("'").strip()
+        quote = quote.split("\n")[0].strip()
+        if len(quote) > 220:
+            quote = quote[:220].rsplit(" ", 1)[0].rstrip(",.;") + "…"
+        if quote:
+            return quote, "ai"
+    return fallback, "fallback"
+
+
+@app.get("/ai/quote")
+def ai_daily_quote(user: User = Depends(get_current_user)):
+    """Standalone endpoint for a fresh AI motivational quote — same
+    generator the Dashboard uses, exposed on its own in case a future
+    screen wants to re-request one without reloading the whole dashboard."""
+    quote, source = _generate_motivation_quote(user, client_today())
+    return {"quote": quote, "source": source}
+
+
 @app.get("/dashboard")
 def dashboard(user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     today = client_today()
@@ -2686,7 +3033,7 @@ def dashboard(user: User = Depends(get_current_user), db: Session = Depends(get_
         1 for g in active_goals_rows if _goal_deadline_meta(g, user, today)["alert_level"] in ("danger", "warning")
     )
 
-    quote = MOTIVATION_QUOTES[today.toordinal() % len(MOTIVATION_QUOTES)]
+    quote, quote_source = _generate_motivation_quote(user, today)
     priorities = [
         "Record every transaction, revenue and expense.",
         "Move one business forward, however small.",
@@ -2708,6 +3055,7 @@ def dashboard(user: User = Depends(get_current_user), db: Session = Depends(get_
         "active_goals": active_goals,
         "goals_needing_attention": goals_needing_attention,
         "motivation_quote": quote,
+        "motivation_quote_source": quote_source,
         "todays_priorities": priorities,
         "mission_objective": "Build Financial Freedom",
     }
@@ -3525,6 +3873,8 @@ def monthly_review(user: User = Depends(get_current_user), db: Session = Depends
         "month_tasks_total": month_tasks_total,
         "month_tasks_done": month_tasks_done,
     }
-    @app.get("/api/health")
-    def health():
-        return {"status": "ok", "time": dt.datetime.utcnow().isoformat()}
+
+
+@app.get("/api/health")
+def health():
+    return {"status": "ok", "time": utcnow().isoformat()}
