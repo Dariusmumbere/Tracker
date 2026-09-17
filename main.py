@@ -1086,7 +1086,7 @@ class DailyTrackerScoreOut(BaseModel):
 class GoalContributeIn(BaseModel):
     amount: float
     note: str = ""
-    date: Optional[date] = None
+    date: Optional[datetime.date] = None
 
     @field_validator("amount")
     @classmethod
@@ -1411,7 +1411,7 @@ class ObjectiveOut(BaseModel):
 
 
 class EvidenceIn(BaseModel):
-    date: Optional[date] = None
+    date: Optional[datetime.date] = None
     category: str = "other"
     description: str
     value: Optional[float] = None
@@ -1492,7 +1492,7 @@ class DecisionOptionIn(BaseModel):
 
 class DecisionIn(BaseModel):
     title: str
-    date: Optional[date] = None
+    date: Optional[datetime.date] = None
     context: str = ""
     problem: str = ""
     options: List[DecisionOptionIn] = []
