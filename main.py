@@ -262,6 +262,19 @@ class User(Base):
     # 4000 in the user's own currency; editable from Settings.
     daily_expense_limit = Column(Float, default=4000.0)
 
+    # ---- Personal Operating System: Identity + configurable score weights ----
+    # "Who am I becoming?" — a first-class statement, not buried in settings.
+    identity_statement = Column(String, default="")
+    identity_updated_at = Column(DateTime, nullable=True)
+    # Identity Alignment Score weights (must sum to ~100, but are normalized
+    # at compute time regardless, so any positive values are safe).
+    weight_execution = Column(Float, default=20.0)
+    weight_growth = Column(Float, default=20.0)
+    weight_financial = Column(Float, default=20.0)
+    weight_discipline = Column(Float, default=15.0)
+    weight_strategy = Column(Float, default=15.0)
+    weight_capacity = Column(Float, default=10.0)
+
     businesses = relationship("Business", back_populates="owner", cascade="all, delete-orphan")
     transactions = relationship("Transaction", back_populates="owner", cascade="all, delete-orphan")
     savings = relationship("Savings", back_populates="owner", cascade="all, delete-orphan")
@@ -282,6 +295,10 @@ class User(Base):
     business_recommendations = relationship("BusinessRecommendation", back_populates="owner", cascade="all, delete-orphan")
     goal_contributions = relationship("GoalContribution", back_populates="owner", cascade="all, delete-orphan")
     tracker_scores = relationship("DailyTrackerScore", back_populates="owner", cascade="all, delete-orphan")
+    objectives = relationship("Objective", back_populates="owner", cascade="all, delete-orphan")
+    evidence_items = relationship("Evidence", back_populates="owner", cascade="all, delete-orphan")
+    experiments = relationship("Experiment", back_populates="owner", cascade="all, delete-orphan")
+    decisions = relationship("Decision", back_populates="owner", cascade="all, delete-orphan")
 
 
 class Business(Base):
@@ -431,15 +448,120 @@ class GoalContribution(Base):
 class Principle(Base):
     """A rule the user has committed to never break (e.g. "Never spend
     savings before recording the sale"). Fed to the AI Advisor on every
-    call so its advice always respects the user's own hard limits."""
+    call so its advice always respects the user's own hard limits.
+
+    Extended for the Personal Operating System: a principle can now carry
+    a concrete behavioral rule and evidence hint, a priority, and an
+    active/inactive flag, so principles can influence daily alignment
+    scoring rather than being static text."""
     __tablename__ = "principles"
     id = Column(Integer, primary_key=True, index=True)
     user_id = Column(Integer, ForeignKey("users.id"), nullable=False, index=True)
     title = Column(String, nullable=False)
     description = Column(String, default="")
+    behavior = Column(String, default="")        # the concrete behavioral rule
+    evidence_hint = Column(String, default="")    # what measurable evidence proves it
+    priority = Column(String, default="medium")   # low | medium | high
+    active = Column(Boolean, default=True)
     created_at = Column(DateTime, default=utcnow)
 
     owner = relationship("User", back_populates="principles")
+
+
+class Objective(Base):
+    """A concrete, measurable target under one of the five Mission
+    dimensions (financial / business / career / education / personal).
+    Sits between the Mission (relatively stable, 2-year direction) and
+    Tasks (what gets done today) — see MISSION -> OBJECTIVE -> GOAL ->
+    SYSTEM -> TASK -> EVIDENCE -> RESULT in the product spec."""
+    __tablename__ = "objectives"
+    id = Column(Integer, primary_key=True, index=True)
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=False, index=True)
+    dimension = Column(String, nullable=False, default="financial")  # financial|business|career|education|personal
+    title = Column(String, nullable=False)
+    description = Column(String, default="")
+    target_metric = Column(String, default="")     # e.g. "monthly recurring income"
+    target_value = Column(Float, nullable=True)
+    baseline_value = Column(Float, nullable=True)
+    current_value = Column(Float, nullable=True)
+    deadline = Column(Date, nullable=True)
+    priority = Column(String, default="medium")     # low|medium|high
+    status = Column(String, default="on_track")     # on_track|at_risk|off_track|completed|overdue
+    created_at = Column(DateTime, default=utcnow)
+
+    owner = relationship("User", back_populates="objectives")
+
+
+class Evidence(Base):
+    """A single measurable proof-of-behavior entry — the core of
+    'evidence > feelings'. Deliberately lightweight (one line + optional
+    number) so logging it daily doesn't become its own chore."""
+    __tablename__ = "evidence"
+    id = Column(Integer, primary_key=True, index=True)
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=False, index=True)
+    date = Column(Date, default=lambda: client_today(), index=True)
+    category = Column(String, nullable=False, default="other")
+    # deep_work | learning | shipped | outreach | business_dev | financial |
+    # decision | capacity | other
+    description = Column(String, nullable=False)
+    value = Column(Float, nullable=True)  # optional quantity (hours, count, amount)
+    objective_id = Column(Integer, ForeignKey("objectives.id"), nullable=True, index=True)
+    created_at = Column(DateTime, default=utcnow)
+
+    owner = relationship("User", back_populates="evidence_items")
+    objective = relationship("Objective")
+
+
+class Experiment(Base):
+    """A time-boxed test of a strategy: hypothesis in, measured result out,
+    explicit conclusion (continue/modify/stop/scale). Connects action to
+    evidence instead of letting activity be assumed to equal progress."""
+    __tablename__ = "experiments"
+    id = Column(Integer, primary_key=True, index=True)
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=False, index=True)
+    title = Column(String, nullable=False)
+    hypothesis = Column(String, default="")
+    metrics_json = Column(String, default="[]")   # list of metric names being tracked
+    start_date = Column(Date, default=lambda: client_today())
+    end_date = Column(Date, nullable=True)
+    expected_result = Column(String, default="")
+    actual_result = Column(String, default="")
+    conclusion = Column(String, default="")        # continue|modify|stop|scale
+    status = Column(String, default="running")      # running|concluded
+    objective_id = Column(Integer, ForeignKey("objectives.id"), nullable=True)
+    created_at = Column(DateTime, default=utcnow)
+
+    owner = relationship("User", back_populates="experiments")
+
+
+class Decision(Base):
+    """The Decision Journal. The goal is not to prove every decision was
+    right — it's to improve the decision-making process over time by
+    recording the reasoning up front and the actual outcome later."""
+    __tablename__ = "decisions"
+    id = Column(Integer, primary_key=True, index=True)
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=False, index=True)
+    title = Column(String, nullable=False)
+    date = Column(Date, default=lambda: client_today(), index=True)
+    context = Column(String, default="")
+    problem = Column(String, default="")
+    options_json = Column(String, default="[]")   # list of {option, pros, cons}
+    chosen_strategy = Column(String, default="")
+    assumptions = Column(String, default="")
+    confidence = Column(String, default="medium")   # low|medium|high
+    expected_outcome = Column(String, default="")
+    evidence_supporting = Column(String, default="")
+    downside = Column(String, default="")
+    plan_b = Column(String, default="")
+    review_date = Column(Date, nullable=True)
+    actual_outcome = Column(String, default="")
+    correct_assumptions = Column(String, default="")
+    wrong_assumptions = Column(String, default="")
+    lessons_learned = Column(String, default="")
+    status = Column(String, default="open")         # open|reviewed
+    created_at = Column(DateTime, default=utcnow)
+
+    owner = relationship("User", back_populates="decisions")
 
 
 class Notification(Base):
@@ -473,6 +595,15 @@ class JournalEntry(Base):
     challenges = Column(String, default="")
     learned = Column(String, default="")
     improve_tomorrow = Column(String, default="")
+    # ---- Personal Operating System: structured reflection ----
+    evidence_produced = Column(String, default="")
+    principle_followed = Column(String, default="")
+    principle_violated = Column(String, default="")
+    reality_taught = Column(String, default="")
+    # The 2028 Test: "If I repeated today's behavior for 730 days, would I
+    # become the person I want to become?"
+    test_2028 = Column(String, nullable=True)   # yes | uncertain | no
+    test_2028_why = Column(String, default="")
     created_at = Column(DateTime, default=utcnow)
 
     owner = relationship("User", back_populates="journal_entries")
@@ -520,6 +651,9 @@ class Todo(Base):
     status = Column(String, default="pending")  # pending | in_progress | completed | abandoned
     ai_feedback = Column(String, default="")
     recurring = Column(Boolean, default=False)
+    # ---- Personal Operating System: link tasks to why they matter ----
+    category = Column(String, nullable=True)  # important | urgent | strategic | maintenance
+    objective_id = Column(Integer, ForeignKey("objectives.id"), nullable=True)
     created_at = Column(DateTime, default=utcnow)
     completed_at = Column(DateTime, nullable=True)
 
@@ -614,6 +748,55 @@ try:
         conn.exec_driver_sql("ALTER TABLE users ADD COLUMN IF NOT EXISTS daily_expense_limit FLOAT DEFAULT 4000")
 except Exception as _mig_err:
     logger.warning("User table migration skipped/failed (non-fatal): %s", _mig_err)
+
+# ----------------------------------------------------------------------------
+# Personal Operating System migration — adds the Identity/scoring-weight
+# columns to `users`, the reflection columns to `journal_entries`, the
+# behavior/priority columns to `principles`, and the objective link to
+# `todos`. All additive (IF NOT EXISTS), never destructive, never rewrites
+# existing data. New tables (objectives, evidence, experiments, decisions)
+# are created by Base.metadata.create_all() above since they didn't exist
+# before — no ALTER needed for those.
+# ----------------------------------------------------------------------------
+try:
+    with engine.begin() as conn:
+        conn.exec_driver_sql("ALTER TABLE users ADD COLUMN IF NOT EXISTS identity_statement VARCHAR DEFAULT ''")
+        conn.exec_driver_sql("ALTER TABLE users ADD COLUMN IF NOT EXISTS identity_updated_at TIMESTAMP")
+        conn.exec_driver_sql("ALTER TABLE users ADD COLUMN IF NOT EXISTS weight_execution FLOAT DEFAULT 20")
+        conn.exec_driver_sql("ALTER TABLE users ADD COLUMN IF NOT EXISTS weight_growth FLOAT DEFAULT 20")
+        conn.exec_driver_sql("ALTER TABLE users ADD COLUMN IF NOT EXISTS weight_financial FLOAT DEFAULT 20")
+        conn.exec_driver_sql("ALTER TABLE users ADD COLUMN IF NOT EXISTS weight_discipline FLOAT DEFAULT 15")
+        conn.exec_driver_sql("ALTER TABLE users ADD COLUMN IF NOT EXISTS weight_strategy FLOAT DEFAULT 15")
+        conn.exec_driver_sql("ALTER TABLE users ADD COLUMN IF NOT EXISTS weight_capacity FLOAT DEFAULT 10")
+except Exception as _mig_err:
+    logger.warning("User POS-column migration skipped/failed (non-fatal): %s", _mig_err)
+
+try:
+    with engine.begin() as conn:
+        conn.exec_driver_sql("ALTER TABLE principles ADD COLUMN IF NOT EXISTS behavior VARCHAR DEFAULT ''")
+        conn.exec_driver_sql("ALTER TABLE principles ADD COLUMN IF NOT EXISTS evidence_hint VARCHAR DEFAULT ''")
+        conn.exec_driver_sql("ALTER TABLE principles ADD COLUMN IF NOT EXISTS priority VARCHAR DEFAULT 'medium'")
+        conn.exec_driver_sql("ALTER TABLE principles ADD COLUMN IF NOT EXISTS active BOOLEAN DEFAULT TRUE")
+except Exception as _mig_err:
+    logger.warning("Principle table migration skipped/failed (non-fatal): %s", _mig_err)
+
+try:
+    with engine.begin() as conn:
+        conn.exec_driver_sql("ALTER TABLE journal_entries ADD COLUMN IF NOT EXISTS evidence_produced VARCHAR DEFAULT ''")
+        conn.exec_driver_sql("ALTER TABLE journal_entries ADD COLUMN IF NOT EXISTS principle_followed VARCHAR DEFAULT ''")
+        conn.exec_driver_sql("ALTER TABLE journal_entries ADD COLUMN IF NOT EXISTS principle_violated VARCHAR DEFAULT ''")
+        conn.exec_driver_sql("ALTER TABLE journal_entries ADD COLUMN IF NOT EXISTS reality_taught VARCHAR DEFAULT ''")
+        conn.exec_driver_sql("ALTER TABLE journal_entries ADD COLUMN IF NOT EXISTS test_2028 VARCHAR")
+        conn.exec_driver_sql("ALTER TABLE journal_entries ADD COLUMN IF NOT EXISTS test_2028_why VARCHAR DEFAULT ''")
+except Exception as _mig_err:
+    logger.warning("JournalEntry table migration skipped/failed (non-fatal): %s", _mig_err)
+
+try:
+    with engine.begin() as conn:
+        conn.exec_driver_sql("ALTER TABLE todos ADD COLUMN IF NOT EXISTS category VARCHAR")
+        conn.exec_driver_sql("ALTER TABLE todos ADD COLUMN IF NOT EXISTS objective_id INTEGER")
+except Exception as _mig_err:
+    logger.warning("Todo table migration skipped/failed (non-fatal): %s", _mig_err)
 
 
 def get_db():
@@ -1093,17 +1276,41 @@ class GoalOut(BaseModel):
 class PrincipleIn(BaseModel):
     title: str
     description: str = ""
+    behavior: str = ""
+    evidence_hint: str = ""
+    priority: str = "medium"
+    active: bool = True
+
+    @field_validator("priority")
+    @classmethod
+    def priority_valid(cls, v):
+        return v if v in ("low", "medium", "high") else "medium"
 
 
 class PrincipleUpdateIn(BaseModel):
     title: Optional[str] = None
     description: Optional[str] = None
+    behavior: Optional[str] = None
+    evidence_hint: Optional[str] = None
+    priority: Optional[str] = None
+    active: Optional[bool] = None
+
+    @field_validator("priority")
+    @classmethod
+    def priority_valid(cls, v):
+        if v is not None and v not in ("low", "medium", "high"):
+            raise ValueError("priority must be one of: low, medium, high")
+        return v
 
 
 class PrincipleOut(BaseModel):
     id: int
     title: str
     description: str
+    behavior: str = ""
+    evidence_hint: str = ""
+    priority: str = "medium"
+    active: bool = True
     created_at: dt
 
     class Config:
@@ -1119,6 +1326,255 @@ class NotificationOut(BaseModel):
 
     class Config:
         from_attributes = True
+
+
+# ----------------------------------------------------------------------------
+# Pydantic schemas — Personal Operating System (Identity, Objectives,
+# Evidence, Experiments, Decisions, Identity Alignment Score)
+# ----------------------------------------------------------------------------
+
+class IdentityOut(BaseModel):
+    statement: str
+    updated_at: Optional[dt] = None
+
+
+class IdentityUpdateIn(BaseModel):
+    statement: str
+
+
+class ScoringWeightsOut(BaseModel):
+    execution: float
+    growth: float
+    financial: float
+    discipline: float
+    strategy: float
+    capacity: float
+
+
+class ScoringWeightsIn(BaseModel):
+    execution: Optional[float] = None
+    growth: Optional[float] = None
+    financial: Optional[float] = None
+    discipline: Optional[float] = None
+    strategy: Optional[float] = None
+    capacity: Optional[float] = None
+
+
+class ObjectiveIn(BaseModel):
+    dimension: str = "financial"
+    title: str
+    description: str = ""
+    target_metric: str = ""
+    target_value: Optional[float] = None
+    baseline_value: Optional[float] = None
+    current_value: Optional[float] = None
+    deadline: Optional[date] = None
+    priority: str = "medium"
+
+    @field_validator("dimension")
+    @classmethod
+    def dim_valid(cls, v):
+        allowed = ("financial", "business", "career", "education", "personal")
+        return v if v in allowed else "financial"
+
+
+class ObjectiveUpdateIn(BaseModel):
+    dimension: Optional[str] = None
+    title: Optional[str] = None
+    description: Optional[str] = None
+    target_metric: Optional[str] = None
+    target_value: Optional[float] = None
+    baseline_value: Optional[float] = None
+    current_value: Optional[float] = None
+    deadline: Optional[date] = None
+    priority: Optional[str] = None
+    status: Optional[str] = None
+
+
+class ObjectiveOut(BaseModel):
+    id: int
+    dimension: str
+    title: str
+    description: str
+    target_metric: str
+    target_value: Optional[float]
+    baseline_value: Optional[float]
+    current_value: Optional[float]
+    deadline: Optional[date]
+    priority: str
+    status: str
+    progress_percent: Optional[float] = None
+    created_at: dt
+
+    class Config:
+        from_attributes = True
+
+
+class EvidenceIn(BaseModel):
+    date: Optional[date] = None
+    category: str = "other"
+    description: str
+    value: Optional[float] = None
+    objective_id: Optional[int] = None
+
+
+class EvidenceOut(BaseModel):
+    id: int
+    date: date
+    category: str
+    description: str
+    value: Optional[float]
+    objective_id: Optional[int]
+    created_at: dt
+
+    class Config:
+        from_attributes = True
+
+
+class ExperimentIn(BaseModel):
+    title: str
+    hypothesis: str = ""
+    metrics: List[str] = []
+    start_date: Optional[date] = None
+    end_date: Optional[date] = None
+    expected_result: str = ""
+    objective_id: Optional[int] = None
+
+
+class ExperimentUpdateIn(BaseModel):
+    title: Optional[str] = None
+    hypothesis: Optional[str] = None
+    metrics: Optional[List[str]] = None
+    start_date: Optional[date] = None
+    end_date: Optional[date] = None
+    expected_result: Optional[str] = None
+    actual_result: Optional[str] = None
+    conclusion: Optional[str] = None
+    status: Optional[str] = None
+    objective_id: Optional[int] = None
+
+
+class ExperimentConcludeIn(BaseModel):
+    actual_result: str
+    conclusion: str  # continue | modify | stop | scale
+
+    @field_validator("conclusion")
+    @classmethod
+    def conclusion_valid(cls, v):
+        if v not in ("continue", "modify", "stop", "scale"):
+            raise ValueError("conclusion must be one of: continue, modify, stop, scale")
+        return v
+
+
+class ExperimentOut(BaseModel):
+    id: int
+    title: str
+    hypothesis: str
+    metrics: List[str] = []
+    start_date: date
+    end_date: Optional[date]
+    expected_result: str
+    actual_result: str
+    conclusion: str
+    status: str
+    objective_id: Optional[int]
+    created_at: dt
+
+    class Config:
+        from_attributes = True
+
+
+class DecisionOptionIn(BaseModel):
+    option: str
+    pros: str = ""
+    cons: str = ""
+
+
+class DecisionIn(BaseModel):
+    title: str
+    date: Optional[date] = None
+    context: str = ""
+    problem: str = ""
+    options: List[DecisionOptionIn] = []
+    chosen_strategy: str = ""
+    assumptions: str = ""
+    confidence: str = "medium"
+    expected_outcome: str = ""
+    evidence_supporting: str = ""
+    downside: str = ""
+    plan_b: str = ""
+    review_date: Optional[date] = None
+
+    @field_validator("confidence")
+    @classmethod
+    def confidence_valid(cls, v):
+        return v if v in ("low", "medium", "high") else "medium"
+
+
+class DecisionUpdateIn(BaseModel):
+    title: Optional[str] = None
+    context: Optional[str] = None
+    problem: Optional[str] = None
+    options: Optional[List[DecisionOptionIn]] = None
+    chosen_strategy: Optional[str] = None
+    assumptions: Optional[str] = None
+    confidence: Optional[str] = None
+    expected_outcome: Optional[str] = None
+    evidence_supporting: Optional[str] = None
+    downside: Optional[str] = None
+    plan_b: Optional[str] = None
+    review_date: Optional[date] = None
+
+
+class DecisionOutcomeIn(BaseModel):
+    actual_outcome: str
+    correct_assumptions: str = ""
+    wrong_assumptions: str = ""
+    lessons_learned: str = ""
+
+
+class DecisionOut(BaseModel):
+    id: int
+    title: str
+    date: date
+    context: str
+    problem: str
+    options: List[DecisionOptionIn] = []
+    chosen_strategy: str
+    assumptions: str
+    confidence: str
+    expected_outcome: str
+    evidence_supporting: str
+    downside: str
+    plan_b: str
+    review_date: Optional[date]
+    actual_outcome: str
+    correct_assumptions: str
+    wrong_assumptions: str
+    lessons_learned: str
+    status: str
+    created_at: dt
+
+    class Config:
+        from_attributes = True
+
+
+class IdentityAlignmentOut(BaseModel):
+    date: date
+    total: float
+    dimensions: dict       # {execution, growth, financial, discipline, strategy, capacity}
+    details: dict          # human-readable explanation per dimension
+    weights: dict
+    warning: Optional[str] = None
+
+
+class Test2028SummaryOut(BaseModel):
+    days: int
+    yes: int
+    uncertain: int
+    no: int
+    entries_logged: int
+    recent_reasons: List[dict]
 
 
 # ----------------------------------------------------------------------------
@@ -1151,6 +1607,19 @@ class JournalIn(BaseModel):
     challenges: str = ""
     learned: str = ""
     improve_tomorrow: str = ""
+    evidence_produced: str = ""
+    principle_followed: str = ""
+    principle_violated: str = ""
+    reality_taught: str = ""
+    test_2028: Optional[str] = None
+    test_2028_why: str = ""
+
+    @field_validator("test_2028")
+    @classmethod
+    def test_2028_valid(cls, v):
+        if v is not None and v not in ("yes", "uncertain", "no"):
+            raise ValueError("test_2028 must be one of: yes, uncertain, no")
+        return v
 
 
 class JournalOut(BaseModel):
@@ -1160,6 +1629,12 @@ class JournalOut(BaseModel):
     challenges: str
     learned: str
     improve_tomorrow: str
+    evidence_produced: str = ""
+    principle_followed: str = ""
+    principle_violated: str = ""
+    reality_taught: str = ""
+    test_2028: Optional[str] = None
+    test_2028_why: str = ""
 
     class Config:
         from_attributes = True
@@ -1199,11 +1674,20 @@ class TodoIn(BaseModel):
     business_id: Optional[int] = None
     due_date: Optional[date] = None
     recurring: bool = False
+    category: Optional[str] = None
+    objective_id: Optional[int] = None
 
     @field_validator("priority")
     @classmethod
     def priority_valid(cls, v):
         return v if v in ("low", "medium", "high") else "medium"
+
+    @field_validator("category")
+    @classmethod
+    def category_valid(cls, v):
+        if v is not None and v not in ("important", "urgent", "strategic", "maintenance"):
+            raise ValueError("category must be one of: important, urgent, strategic, maintenance")
+        return v
 
 
 class TodoUpdateIn(BaseModel):
@@ -1214,6 +1698,8 @@ class TodoUpdateIn(BaseModel):
     due_date: Optional[date] = None
     status: Optional[str] = None
     recurring: Optional[bool] = None
+    category: Optional[str] = None
+    objective_id: Optional[int] = None
 
     @field_validator("priority")
     @classmethod
@@ -1229,6 +1715,13 @@ class TodoUpdateIn(BaseModel):
             raise ValueError("status must be one of: pending, in_progress, completed, abandoned")
         return v
 
+    @field_validator("category")
+    @classmethod
+    def category_valid(cls, v):
+        if v is not None and v not in ("important", "urgent", "strategic", "maintenance"):
+            raise ValueError("category must be one of: important, urgent, strategic, maintenance")
+        return v
+
 
 class TodoOut(BaseModel):
     id: int
@@ -1240,6 +1733,8 @@ class TodoOut(BaseModel):
     status: str
     ai_feedback: str
     recurring: bool
+    category: Optional[str] = None
+    objective_id: Optional[int] = None
     created_at: dt
     completed_at: Optional[dt]
 
@@ -2240,7 +2735,11 @@ def create_principle(body: PrincipleIn, user: User = Depends(get_current_user), 
     title = body.title.strip()
     if not title:
         raise HTTPException(status_code=400, detail="Principle title is required.")
-    p = Principle(user_id=user.id, title=title, description=body.description.strip())
+    p = Principle(
+        user_id=user.id, title=title, description=body.description.strip(),
+        behavior=body.behavior.strip(), evidence_hint=body.evidence_hint.strip(),
+        priority=body.priority, active=body.active,
+    )
     db.add(p)
     db.commit()
     db.refresh(p)
@@ -2258,6 +2757,14 @@ def update_principle(principle_id: int, body: PrincipleUpdateIn, user: User = De
             p.title = title
     if body.description is not None:
         p.description = body.description.strip()
+    if body.behavior is not None:
+        p.behavior = body.behavior.strip()
+    if body.evidence_hint is not None:
+        p.evidence_hint = body.evidence_hint.strip()
+    if body.priority is not None:
+        p.priority = body.priority
+    if body.active is not None:
+        p.active = body.active
     db.commit()
     db.refresh(p)
     return p
@@ -2319,6 +2826,578 @@ def update_mission(body: MissionUpdateIn, user: User = Depends(get_current_user)
 
 
 # ----------------------------------------------------------------------------
+# Identity — "Who am I becoming?" First-class, not buried in settings.
+# ----------------------------------------------------------------------------
+
+@app.get("/identity", response_model=IdentityOut)
+def get_identity(user: User = Depends(get_current_user)):
+    return IdentityOut(statement=user.identity_statement or "", updated_at=user.identity_updated_at)
+
+
+@app.put("/identity", response_model=IdentityOut)
+def update_identity(body: IdentityUpdateIn, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    user.identity_statement = body.statement.strip()
+    user.identity_updated_at = utcnow()
+    db.commit()
+    db.refresh(user)
+    return IdentityOut(statement=user.identity_statement, updated_at=user.identity_updated_at)
+
+
+# ----------------------------------------------------------------------------
+# Scoring weights — Identity Alignment Score is a diagnostic instrument, not
+# the objective itself, so its weighting must be visible and editable rather
+# than a hidden constant.
+# ----------------------------------------------------------------------------
+
+@app.get("/settings/scoring-weights", response_model=ScoringWeightsOut)
+def get_scoring_weights(user: User = Depends(get_current_user)):
+    return ScoringWeightsOut(
+        execution=user.weight_execution, growth=user.weight_growth, financial=user.weight_financial,
+        discipline=user.weight_discipline, strategy=user.weight_strategy, capacity=user.weight_capacity,
+    )
+
+
+@app.put("/settings/scoring-weights", response_model=ScoringWeightsOut)
+def update_scoring_weights(body: ScoringWeightsIn, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    for field in ("execution", "growth", "financial", "discipline", "strategy", "capacity"):
+        val = getattr(body, field)
+        if val is not None and val >= 0:
+            setattr(user, f"weight_{field}", val)
+    db.commit()
+    db.refresh(user)
+    return get_scoring_weights(user)
+
+
+# ----------------------------------------------------------------------------
+# Objectives — sits between Mission (stable direction) and Tasks (what gets
+# done today). MISSION -> OBJECTIVE -> GOAL -> SYSTEM -> TASK -> EVIDENCE.
+# ----------------------------------------------------------------------------
+
+def _objective_status(o: Objective, today: date) -> str:
+    if o.status == "completed":
+        return "completed"
+    if o.deadline and today > o.deadline and o.status != "completed":
+        return "overdue"
+    if o.target_value is None or o.current_value is None or o.baseline_value is None or not o.deadline:
+        return o.status or "on_track"
+    total_span = max(1, (o.deadline - o.created_at.date()).days) if o.created_at else None
+    denom = (o.target_value - o.baseline_value)
+    if denom == 0:
+        return "on_track"
+    progress_ratio = (o.current_value - o.baseline_value) / denom
+    if total_span:
+        elapsed_ratio = min(1.0, max(0.0, (today - o.created_at.date()).days / total_span))
+    else:
+        elapsed_ratio = 0.0
+    if progress_ratio >= 1.0:
+        return "completed"
+    if elapsed_ratio <= 0:
+        return "on_track"
+    pace = progress_ratio / elapsed_ratio if elapsed_ratio else 1.0
+    if pace >= 0.85:
+        return "on_track"
+    if pace >= 0.5:
+        return "at_risk"
+    return "off_track"
+
+
+def _objective_out(o: Objective) -> ObjectiveOut:
+    today = client_today()
+    status = _objective_status(o, today)
+    progress = None
+    if o.target_value is not None and o.baseline_value is not None and o.current_value is not None:
+        denom = (o.target_value - o.baseline_value)
+        if denom != 0:
+            progress = round(max(0.0, min(150.0, (o.current_value - o.baseline_value) / denom * 100)), 1)
+    return ObjectiveOut(
+        id=o.id, dimension=o.dimension, title=o.title, description=o.description,
+        target_metric=o.target_metric, target_value=o.target_value, baseline_value=o.baseline_value,
+        current_value=o.current_value, deadline=o.deadline, priority=o.priority, status=status,
+        progress_percent=progress, created_at=o.created_at,
+    )
+
+
+@app.get("/objectives", response_model=List[ObjectiveOut])
+def list_objectives(dimension: Optional[str] = None, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    q = db.query(Objective).filter(Objective.user_id == user.id)
+    if dimension:
+        q = q.filter(Objective.dimension == dimension)
+    rows = q.order_by(Objective.created_at.asc()).all()
+    return [_objective_out(o) for o in rows]
+
+
+@app.post("/objectives", response_model=ObjectiveOut)
+def create_objective(body: ObjectiveIn, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    title = body.title.strip()
+    if not title:
+        raise HTTPException(status_code=400, detail="Objective title is required.")
+    o = Objective(
+        user_id=user.id, dimension=body.dimension, title=title, description=body.description.strip(),
+        target_metric=body.target_metric.strip(), target_value=body.target_value,
+        baseline_value=body.baseline_value, current_value=body.current_value if body.current_value is not None else body.baseline_value,
+        deadline=body.deadline, priority=body.priority,
+    )
+    db.add(o)
+    db.commit()
+    db.refresh(o)
+    return _objective_out(o)
+
+
+@app.put("/objectives/{objective_id}", response_model=ObjectiveOut)
+def update_objective(objective_id: int, body: ObjectiveUpdateIn, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    o = db.query(Objective).filter(Objective.id == objective_id, Objective.user_id == user.id).first()
+    if not o:
+        raise HTTPException(status_code=404, detail=f"Objective {objective_id} not found for this account.")
+    for field in ("dimension", "title", "description", "target_metric", "target_value", "baseline_value",
+                  "current_value", "deadline", "priority", "status"):
+        val = getattr(body, field)
+        if val is not None:
+            setattr(o, field, val.strip() if isinstance(val, str) and field in ("title", "description", "target_metric") else val)
+    db.commit()
+    db.refresh(o)
+    return _objective_out(o)
+
+
+@app.delete("/objectives/{objective_id}")
+def delete_objective(objective_id: int, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    o = db.query(Objective).filter(Objective.id == objective_id, Objective.user_id == user.id).first()
+    if not o:
+        raise HTTPException(status_code=404, detail=f"Objective {objective_id} not found for this account.")
+    db.delete(o)
+    db.commit()
+    return {"ok": True}
+
+
+# ----------------------------------------------------------------------------
+# Evidence — "evidence > feelings". Lightweight, measurable proof of
+# behavior, optionally linked to an Objective.
+# ----------------------------------------------------------------------------
+
+EVIDENCE_CATEGORIES = (
+    "deep_work", "learning", "shipped", "outreach", "business_dev",
+    "financial", "decision", "capacity", "other",
+)
+
+
+@app.get("/evidence", response_model=List[EvidenceOut])
+def list_evidence(
+    days: int = Query(30, le=730), category: Optional[str] = None, objective_id: Optional[int] = None,
+    user: User = Depends(get_current_user), db: Session = Depends(get_db),
+):
+    today = client_today()
+    start = today - timedelta(days=days)
+    q = db.query(Evidence).filter(Evidence.user_id == user.id, Evidence.date >= start, Evidence.date <= today)
+    if category:
+        q = q.filter(Evidence.category == category)
+    if objective_id:
+        q = q.filter(Evidence.objective_id == objective_id)
+    return q.order_by(Evidence.date.desc(), Evidence.created_at.desc()).all()
+
+
+@app.post("/evidence", response_model=EvidenceOut)
+def create_evidence(body: EvidenceIn, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    desc = body.description.strip()
+    if not desc:
+        raise HTTPException(status_code=400, detail="Evidence description is required.")
+    category = body.category if body.category in EVIDENCE_CATEGORIES else "other"
+    if body.objective_id:
+        obj = db.query(Objective).filter(Objective.id == body.objective_id, Objective.user_id == user.id).first()
+        if not obj:
+            raise HTTPException(status_code=404, detail=f"Objective {body.objective_id} not found for this account.")
+    e = Evidence(
+        user_id=user.id, date=body.date or client_today(), category=category, description=desc,
+        value=body.value, objective_id=body.objective_id,
+    )
+    db.add(e)
+    db.commit()
+    db.refresh(e)
+    return e
+
+
+@app.delete("/evidence/{evidence_id}")
+def delete_evidence(evidence_id: int, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    e = db.query(Evidence).filter(Evidence.id == evidence_id, Evidence.user_id == user.id).first()
+    if not e:
+        raise HTTPException(status_code=404, detail=f"Evidence {evidence_id} not found for this account.")
+    db.delete(e)
+    db.commit()
+    return {"ok": True}
+
+
+# ----------------------------------------------------------------------------
+# Experiments — time-boxed tests of a strategy. Connects action to evidence
+# instead of letting activity be assumed to equal progress.
+# ----------------------------------------------------------------------------
+
+def _experiment_out(x: Experiment) -> ExperimentOut:
+    try:
+        metrics = json.loads(x.metrics_json or "[]")
+    except Exception:
+        metrics = []
+    return ExperimentOut(
+        id=x.id, title=x.title, hypothesis=x.hypothesis, metrics=metrics, start_date=x.start_date,
+        end_date=x.end_date, expected_result=x.expected_result, actual_result=x.actual_result,
+        conclusion=x.conclusion, status=x.status, objective_id=x.objective_id, created_at=x.created_at,
+    )
+
+
+@app.get("/experiments", response_model=List[ExperimentOut])
+def list_experiments(status: Optional[str] = None, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    q = db.query(Experiment).filter(Experiment.user_id == user.id)
+    if status:
+        q = q.filter(Experiment.status == status)
+    rows = q.order_by(Experiment.created_at.desc()).all()
+    return [_experiment_out(x) for x in rows]
+
+
+@app.post("/experiments", response_model=ExperimentOut)
+def create_experiment(body: ExperimentIn, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    title = body.title.strip()
+    if not title:
+        raise HTTPException(status_code=400, detail="Experiment title is required.")
+    x = Experiment(
+        user_id=user.id, title=title, hypothesis=body.hypothesis.strip(), metrics_json=json.dumps(body.metrics or []),
+        start_date=body.start_date or client_today(), end_date=body.end_date,
+        expected_result=body.expected_result.strip(), objective_id=body.objective_id,
+    )
+    db.add(x)
+    db.commit()
+    db.refresh(x)
+    return _experiment_out(x)
+
+
+@app.put("/experiments/{experiment_id}", response_model=ExperimentOut)
+def update_experiment(experiment_id: int, body: ExperimentUpdateIn, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    x = db.query(Experiment).filter(Experiment.id == experiment_id, Experiment.user_id == user.id).first()
+    if not x:
+        raise HTTPException(status_code=404, detail=f"Experiment {experiment_id} not found for this account.")
+    if body.title is not None:
+        x.title = body.title.strip()
+    if body.hypothesis is not None:
+        x.hypothesis = body.hypothesis.strip()
+    if body.metrics is not None:
+        x.metrics_json = json.dumps(body.metrics)
+    if body.start_date is not None:
+        x.start_date = body.start_date
+    if body.end_date is not None:
+        x.end_date = body.end_date
+    if body.expected_result is not None:
+        x.expected_result = body.expected_result.strip()
+    if body.actual_result is not None:
+        x.actual_result = body.actual_result.strip()
+    if body.conclusion is not None:
+        x.conclusion = body.conclusion
+    if body.status is not None:
+        x.status = body.status
+    if body.objective_id is not None:
+        x.objective_id = body.objective_id
+    db.commit()
+    db.refresh(x)
+    return _experiment_out(x)
+
+
+@app.post("/experiments/{experiment_id}/conclude", response_model=ExperimentOut)
+def conclude_experiment(experiment_id: int, body: ExperimentConcludeIn, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    x = db.query(Experiment).filter(Experiment.id == experiment_id, Experiment.user_id == user.id).first()
+    if not x:
+        raise HTTPException(status_code=404, detail=f"Experiment {experiment_id} not found for this account.")
+    x.actual_result = body.actual_result.strip()
+    x.conclusion = body.conclusion
+    x.status = "concluded"
+    if not x.end_date:
+        x.end_date = client_today()
+    db.commit()
+    db.refresh(x)
+    return _experiment_out(x)
+
+
+@app.delete("/experiments/{experiment_id}")
+def delete_experiment(experiment_id: int, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    x = db.query(Experiment).filter(Experiment.id == experiment_id, Experiment.user_id == user.id).first()
+    if not x:
+        raise HTTPException(status_code=404, detail=f"Experiment {experiment_id} not found for this account.")
+    db.delete(x)
+    db.commit()
+    return {"ok": True}
+
+
+# ----------------------------------------------------------------------------
+# Decision Journal — the goal is not to prove every decision was right, it's
+# to improve the decision-making process by recording the reasoning up front
+# and the actual outcome later.
+# ----------------------------------------------------------------------------
+
+def _decision_out(d: Decision) -> DecisionOut:
+    try:
+        options = json.loads(d.options_json or "[]")
+    except Exception:
+        options = []
+    return DecisionOut(
+        id=d.id, title=d.title, date=d.date, context=d.context, problem=d.problem, options=options,
+        chosen_strategy=d.chosen_strategy, assumptions=d.assumptions, confidence=d.confidence,
+        expected_outcome=d.expected_outcome, evidence_supporting=d.evidence_supporting, downside=d.downside,
+        plan_b=d.plan_b, review_date=d.review_date, actual_outcome=d.actual_outcome,
+        correct_assumptions=d.correct_assumptions, wrong_assumptions=d.wrong_assumptions,
+        lessons_learned=d.lessons_learned, status=d.status, created_at=d.created_at,
+    )
+
+
+@app.get("/decisions", response_model=List[DecisionOut])
+def list_decisions(status: Optional[str] = None, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    q = db.query(Decision).filter(Decision.user_id == user.id)
+    if status:
+        q = q.filter(Decision.status == status)
+    rows = q.order_by(Decision.date.desc()).all()
+    return [_decision_out(d) for d in rows]
+
+
+@app.post("/decisions", response_model=DecisionOut)
+def create_decision(body: DecisionIn, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    title = body.title.strip()
+    if not title:
+        raise HTTPException(status_code=400, detail="Decision title is required.")
+    d = Decision(
+        user_id=user.id, title=title, date=body.date or client_today(), context=body.context.strip(),
+        problem=body.problem.strip(), options_json=json.dumps([o.model_dump() for o in body.options]),
+        chosen_strategy=body.chosen_strategy.strip(), assumptions=body.assumptions.strip(),
+        confidence=body.confidence, expected_outcome=body.expected_outcome.strip(),
+        evidence_supporting=body.evidence_supporting.strip(), downside=body.downside.strip(),
+        plan_b=body.plan_b.strip(), review_date=body.review_date,
+    )
+    db.add(d)
+    db.commit()
+    db.refresh(d)
+    return _decision_out(d)
+
+
+@app.put("/decisions/{decision_id}", response_model=DecisionOut)
+def update_decision(decision_id: int, body: DecisionUpdateIn, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    d = db.query(Decision).filter(Decision.id == decision_id, Decision.user_id == user.id).first()
+    if not d:
+        raise HTTPException(status_code=404, detail=f"Decision {decision_id} not found for this account.")
+    if body.title is not None:
+        d.title = body.title.strip()
+    if body.context is not None:
+        d.context = body.context.strip()
+    if body.problem is not None:
+        d.problem = body.problem.strip()
+    if body.options is not None:
+        d.options_json = json.dumps([o.model_dump() for o in body.options])
+    if body.chosen_strategy is not None:
+        d.chosen_strategy = body.chosen_strategy.strip()
+    if body.assumptions is not None:
+        d.assumptions = body.assumptions.strip()
+    if body.confidence is not None:
+        d.confidence = body.confidence
+    if body.expected_outcome is not None:
+        d.expected_outcome = body.expected_outcome.strip()
+    if body.evidence_supporting is not None:
+        d.evidence_supporting = body.evidence_supporting.strip()
+    if body.downside is not None:
+        d.downside = body.downside.strip()
+    if body.plan_b is not None:
+        d.plan_b = body.plan_b.strip()
+    if body.review_date is not None:
+        d.review_date = body.review_date
+    db.commit()
+    db.refresh(d)
+    return _decision_out(d)
+
+
+@app.put("/decisions/{decision_id}/outcome", response_model=DecisionOut)
+def record_decision_outcome(decision_id: int, body: DecisionOutcomeIn, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    d = db.query(Decision).filter(Decision.id == decision_id, Decision.user_id == user.id).first()
+    if not d:
+        raise HTTPException(status_code=404, detail=f"Decision {decision_id} not found for this account.")
+    d.actual_outcome = body.actual_outcome.strip()
+    d.correct_assumptions = body.correct_assumptions.strip()
+    d.wrong_assumptions = body.wrong_assumptions.strip()
+    d.lessons_learned = body.lessons_learned.strip()
+    d.status = "reviewed"
+    db.commit()
+    db.refresh(d)
+    return _decision_out(d)
+
+
+@app.delete("/decisions/{decision_id}")
+def delete_decision(decision_id: int, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    d = db.query(Decision).filter(Decision.id == decision_id, Decision.user_id == user.id).first()
+    if not d:
+        raise HTTPException(status_code=404, detail=f"Decision {decision_id} not found for this account.")
+    db.delete(d)
+    db.commit()
+    return {"ok": True}
+
+
+# ----------------------------------------------------------------------------
+# Identity Alignment Score — replaces the bookkeeping-oriented "execution
+# score" concept with six explainable, individually-weighted dimensions.
+# The score is a diagnostic instrument, never the goal: every number here
+# is traceable back to a plain-language reason, and a "busy but not
+# progressing" warning fires when execution is high but growth/financial/
+# strategy are not, so high activity is never silently read as progress.
+# ----------------------------------------------------------------------------
+
+def _compute_identity_alignment(db: Session, user: User, on_date: date):
+    today = on_date
+    week_start = today - timedelta(days=today.weekday())
+    details = {}
+
+    # EXECUTION — did today's planned/critical tasks actually get done?
+    if on_date == client_today():
+        _refresh_recurring_todos(db, user)
+    tasks_due = db.query(Todo).filter(Todo.user_id == user.id, Todo.due_date == today).all()
+    tasks_total = len(tasks_due)
+    tasks_done = len([t for t in tasks_due if t.status == "completed"])
+    execution_ratio = (tasks_done / tasks_total) if tasks_total else 1.0
+    execution_score = round(execution_ratio * 100, 1)
+    details["execution"] = {
+        "score": execution_score,
+        "note": (f"{tasks_done}/{tasks_total} tasks due today completed" if tasks_total
+                  else "No tasks were scheduled today — nothing to measure execution against."),
+    }
+
+    # GROWTH / BUILDING — deep work, learning, shipped, business development
+    growth_categories = {"deep_work", "learning", "shipped", "business_dev", "outreach"}
+    evidence_today = db.query(Evidence).filter(Evidence.user_id == user.id, Evidence.date == today).all()
+    growth_items = [e for e in evidence_today if e.category in growth_categories]
+    growth_score = round(min(100.0, len(growth_items) * 25.0), 1)
+    details["growth"] = {
+        "score": growth_score,
+        "note": (f"{len(growth_items)} growth/building evidence item(s) logged today "
+                  f"({', '.join(sorted({e.category for e in growth_items})) or 'none'})."),
+    }
+
+    # FINANCIAL PROGRESS — revenue/expense recorded, savings activity, business engagement
+    rev_today = _tx_sum(db, user, "revenue", today, today)
+    exp_today = _tx_sum(db, user, "expense", today, today)
+    savings_this_week = db.query(Savings).filter(
+        Savings.user_id == user.id, Savings.date >= week_start, Savings.date <= today).count()
+    active_businesses = db.query(Business).filter(Business.user_id == user.id, Business.status == "active").all()
+    three_days_ago = today - timedelta(days=3)
+    engaged = 0
+    for b in active_businesses:
+        has_tx = db.query(Transaction).filter(
+            Transaction.business_id == b.id, Transaction.user_id == user.id,
+            Transaction.date >= three_days_ago, Transaction.date <= today,
+        ).first()
+        if has_tx:
+            engaged += 1
+    engagement_ratio = (engaged / len(active_businesses)) if active_businesses else 1.0
+    financial_score = round(
+        (35 if rev_today > 0 else 0) + (20 if exp_today > 0 else 0) +
+        (15 if savings_this_week > 0 else 0) + 30 * engagement_ratio, 1,
+    )
+    details["financial"] = {
+        "score": financial_score,
+        "note": (f"Revenue {'recorded' if rev_today>0 else 'not recorded'} today, expenses "
+                  f"{'recorded' if exp_today>0 else 'not recorded'}, {savings_this_week} savings entr"
+                  f"{'y' if savings_this_week==1 else 'ies'} this week, {engaged}/{len(active_businesses)} "
+                  f"active businesses touched in the last 3 days."),
+    }
+
+    # DISCIPLINE — commitments kept (recurring systems) + principle followed today
+    journal_today = db.query(JournalEntry).filter(JournalEntry.user_id == user.id, JournalEntry.date == today).first()
+    principle_followed = bool(journal_today and journal_today.principle_followed and journal_today.principle_followed.strip())
+    principle_violated = bool(journal_today and journal_today.principle_violated and journal_today.principle_violated.strip())
+    recurring_due = [t for t in tasks_due if t.recurring]
+    recurring_done = [t for t in recurring_due if t.status == "completed"]
+    recurring_ratio = (len(recurring_done) / len(recurring_due)) if recurring_due else 1.0
+    discipline_score = round(60 * recurring_ratio + (40 if principle_followed and not principle_violated else (20 if principle_followed else 0)), 1)
+    details["discipline"] = {
+        "score": discipline_score,
+        "note": (f"{len(recurring_done)}/{len(recurring_due)} recurring system(s) followed today; "
+                  + ("a principle violation was logged today." if principle_violated
+                     else "a principle was explicitly followed today." if principle_followed
+                     else "no principle followed/violated was logged today.")),
+    }
+
+    # STRATEGIC PROGRESS — decisions made/reviewed, experiments running
+    decisions_week = db.query(Decision).filter(
+        Decision.user_id == user.id, Decision.date >= week_start, Decision.date <= today).count()
+    decisions_reviewed_week = db.query(Decision).filter(
+        Decision.user_id == user.id, Decision.status == "reviewed",
+        Decision.review_date != None, Decision.review_date >= week_start, Decision.review_date <= today).count()  # noqa: E711
+    experiments_active = db.query(Experiment).filter(Experiment.user_id == user.id, Experiment.status == "running").count()
+    strategy_points = (40 if decisions_week > 0 else 0) + (30 if decisions_reviewed_week > 0 else 0) + (30 if experiments_active > 0 else 0)
+    strategy_score = round(min(100.0, strategy_points), 1)
+    details["strategy"] = {
+        "score": strategy_score,
+        "note": (f"{decisions_week} decision(s) logged this week, {decisions_reviewed_week} reviewed this week, "
+                  f"{experiments_active} experiment(s) currently running."),
+    }
+
+    # PERSONAL CAPACITY — optional; journal completed + any capacity evidence logged
+    capacity_items = [e for e in evidence_today if e.category == "capacity"]
+    capacity_score = round(min(100.0, (50 if journal_today else 0) + len(capacity_items) * 25), 1)
+    details["capacity"] = {
+        "score": capacity_score,
+        "note": (f"Journal {'completed' if journal_today else 'not completed'} today; "
+                  f"{len(capacity_items)} capacity evidence item(s) logged."),
+    }
+
+    dims = {
+        "execution": execution_score, "growth": growth_score, "financial": financial_score,
+        "discipline": discipline_score, "strategy": strategy_score, "capacity": capacity_score,
+    }
+    weights = {
+        "execution": user.weight_execution, "growth": user.weight_growth, "financial": user.weight_financial,
+        "discipline": user.weight_discipline, "strategy": user.weight_strategy, "capacity": user.weight_capacity,
+    }
+    total_weight = sum(weights.values()) or 1.0
+    total = round(sum(dims[k] * weights[k] for k in dims) / total_weight, 1)
+
+    # "Busy but not progressing" detector — high execution/activity with low
+    # growth+financial+strategy is flagged explicitly rather than silently
+    # reported as a good score.
+    warning = None
+    outward_avg = (growth_score + financial_score + strategy_score) / 3
+    if execution_score >= 70 and outward_avg < 30:
+        warning = (
+            "Execution looks strong today, but growth, financial and strategic evidence are all low. "
+            "This can mean you were busy without producing progress toward your objectives — worth a second look."
+        )
+    elif tasks_total == 0 and evidence_today == []:
+        warning = "No tasks and no evidence were logged today — there isn't enough data yet to say whether today moved you forward."
+
+    return total, dims, details, weights, warning
+
+
+@app.get("/scores/identity-alignment", response_model=IdentityAlignmentOut)
+def identity_alignment_score(
+    on: Optional[date] = Query(None, alias="date"),
+    user: User = Depends(get_current_user), db: Session = Depends(get_db),
+):
+    target_date = on or client_today()
+    total, dims, details, weights, warning = _compute_identity_alignment(db, user, target_date)
+    return IdentityAlignmentOut(date=target_date, total=total, dimensions=dims, details=details, weights=weights, warning=warning)
+
+
+# ----------------------------------------------------------------------------
+# The 2028 Test — "If I repeated today's behavior for the next 730 days,
+# would I become the person I want to become?" A strategic reflection tool,
+# not a motivational gimmick — tracked over time with reasons.
+# ----------------------------------------------------------------------------
+
+@app.get("/reviews/2028-test", response_model=Test2028SummaryOut)
+def test_2028_summary(days: int = Query(30, le=730), user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    today = client_today()
+    start = today - timedelta(days=days)
+    rows = db.query(JournalEntry).filter(
+        JournalEntry.user_id == user.id, JournalEntry.date >= start, JournalEntry.date <= today,
+        JournalEntry.test_2028.isnot(None),
+    ).order_by(JournalEntry.date.desc()).all()
+    yes = len([r for r in rows if r.test_2028 == "yes"])
+    uncertain = len([r for r in rows if r.test_2028 == "uncertain"])
+    no = len([r for r in rows if r.test_2028 == "no"])
+    reasons = [
+        {"date": r.date.isoformat(), "answer": r.test_2028, "why": r.test_2028_why}
+        for r in rows if r.test_2028 in ("uncertain", "no") and r.test_2028_why
+    ][:15]
+    return Test2028SummaryOut(days=days, yes=yes, uncertain=uncertain, no=no, entries_logged=len(rows), recent_reasons=reasons)
+
+
+# ----------------------------------------------------------------------------
 # Daily Journal
 # ----------------------------------------------------------------------------
 
@@ -2349,12 +3428,21 @@ def create_journal(body: JournalIn, user: User = Depends(get_current_user), db: 
         existing.challenges = body.challenges
         existing.learned = body.learned
         existing.improve_tomorrow = body.improve_tomorrow
+        existing.evidence_produced = body.evidence_produced
+        existing.principle_followed = body.principle_followed
+        existing.principle_violated = body.principle_violated
+        existing.reality_taught = body.reality_taught
+        existing.test_2028 = body.test_2028
+        existing.test_2028_why = body.test_2028_why
         db.commit()
         db.refresh(existing)
         return existing
     entry = JournalEntry(
         user_id=user.id, date=entry_date, accomplished=body.accomplished, challenges=body.challenges,
         learned=body.learned, improve_tomorrow=body.improve_tomorrow,
+        evidence_produced=body.evidence_produced, principle_followed=body.principle_followed,
+        principle_violated=body.principle_violated, reality_taught=body.reality_taught,
+        test_2028=body.test_2028, test_2028_why=body.test_2028_why,
     )
     db.add(entry)
     db.commit()
@@ -2371,6 +3459,12 @@ def update_journal(entry_id: int, body: JournalIn, user: User = Depends(get_curr
     entry.challenges = body.challenges
     entry.learned = body.learned
     entry.improve_tomorrow = body.improve_tomorrow
+    entry.evidence_produced = body.evidence_produced
+    entry.principle_followed = body.principle_followed
+    entry.principle_violated = body.principle_violated
+    entry.reality_taught = body.reality_taught
+    entry.test_2028 = body.test_2028
+    entry.test_2028_why = body.test_2028_why
     if body.date:
         entry.date = body.date
     db.commit()
@@ -2427,6 +3521,7 @@ def _todo_out(t: Todo) -> TodoOut:
     return TodoOut(
         id=t.id, title=t.title, notes=t.notes, priority=t.priority, business_id=t.business_id,
         due_date=t.due_date, status=t.status, ai_feedback=t.ai_feedback or "", recurring=bool(t.recurring),
+        category=t.category, objective_id=t.objective_id,
         created_at=t.created_at, completed_at=t.completed_at,
     )
 
@@ -2515,6 +3610,7 @@ def create_todo(body: TodoIn, user: User = Depends(get_current_user), db: Sessio
     t = Todo(
         user_id=user.id, title=body.title.strip(), notes=body.notes or "", priority=body.priority,
         business_id=body.business_id, due_date=body.due_date or client_today(), recurring=body.recurring,
+        category=body.category, objective_id=body.objective_id,
     )
     db.add(t)
     db.commit()
@@ -2547,6 +3643,10 @@ def update_todo(todo_id: int, body: TodoUpdateIn, user: User = Depends(get_curre
         t.due_date = body.due_date
     if body.recurring is not None:
         t.recurring = body.recurring
+    if body.category is not None:
+        t.category = body.category
+    if body.objective_id is not None:
+        t.objective_id = body.objective_id
     if body.status is not None:
         was_completed = t.status == "completed"
         t.status = body.status
@@ -3268,10 +4368,31 @@ def _build_full_system_snapshot(db: Session, user: User, light: bool = False) ->
     todo_snapshot = [{"title": t.title, "priority": t.priority, "status": t.status, "recurring": bool(t.recurring)} for t in todos_today]
 
     score, breakdown, _, tasks_total, tasks_completed = _compute_execution_score(db, user, today)
+    ia_total, ia_dims, ia_details, ia_weights, ia_warning = _compute_identity_alignment(db, user, today)
+
+    objectives = db.query(Objective).filter(Objective.user_id == user.id).all()
+    objective_snapshot = [
+        {
+            "id": o.id, "dimension": o.dimension, "title": o.title, "target_metric": o.target_metric,
+            "target_value": o.target_value, "current_value": o.current_value, "status": _objective_status(o, today),
+            "deadline": o.deadline.isoformat() if o.deadline else None,
+        }
+        for o in objectives
+    ]
+    open_decisions = db.query(Decision).filter(Decision.user_id == user.id, Decision.status == "open").order_by(Decision.date.desc()).limit(10).all()
+    decision_snapshot = [
+        {"title": d.title, "date": d.date.isoformat(), "chosen_strategy": d.chosen_strategy, "review_date": d.review_date.isoformat() if d.review_date else None}
+        for d in open_decisions
+    ]
+    running_experiments = db.query(Experiment).filter(Experiment.user_id == user.id, Experiment.status == "running").all()
+    experiment_snapshot = [{"title": x.title, "hypothesis": x.hypothesis, "start_date": x.start_date.isoformat()} for x in running_experiments]
+    recent_evidence = db.query(Evidence).filter(Evidence.user_id == user.id).order_by(Evidence.date.desc()).limit(15).all()
+    evidence_snapshot = [{"date": e.date.isoformat(), "category": e.category, "description": e.description} for e in recent_evidence]
 
     snapshot = {
         "currency": user.currency,
         "today": today.isoformat(),
+        "identity_statement": user.identity_statement or None,
         "mission": {
             "title": mission.title,
             "start_date": mission.start_date.isoformat() if mission.start_date else None,
@@ -3282,6 +4403,7 @@ def _build_full_system_snapshot(db: Session, user: User, light: bool = False) ->
             "percent_complete": mission.percent_complete,
             "phase": mission.current_phase,
         },
+        "objectives": objective_snapshot,
         "non_negotiable_principles": principle_snapshot,
         "businesses": biz_snapshot,
         "goals": goal_snapshot,
@@ -3293,6 +4415,12 @@ def _build_full_system_snapshot(db: Session, user: User, light: bool = False) ->
         "todays_tasks": todo_snapshot,
         "todays_execution_score": score,
         "execution_breakdown": breakdown,
+        "identity_alignment_score": ia_total,
+        "identity_alignment_dimensions": ia_dims,
+        "identity_alignment_warning": ia_warning,
+        "open_decisions_awaiting_review": decision_snapshot,
+        "running_experiments": experiment_snapshot,
+        "recent_evidence": evidence_snapshot,
     }
 
     if not light:
@@ -3683,24 +4811,40 @@ def ai_chat(body: ChatIn, user: User = Depends(get_current_user), db: Session = 
     history = [{"role": h.role, "content": h.content} for h in reversed(history_rows)]
 
     system_context = (
-        _currency_instruction(user) + " You are the AI Advisor inside this user's Business Growth "
-        "Tracker app. You are fully aware of everything running in their system — every business, "
-        "every transaction summary, every goal, total and per-business savings balances and history, "
-        "active hotspots, today's tasks, all currently open tasks, recent journal entries, recent "
-        "business-idea recommendations, unread notifications, their full mission timeline (start date, "
-        "end date, percent complete, days remaining, current phase), and recent daily execution scores. "
-        "Use this JSON snapshot of their live data, pulled fresh from the database for this message, to "
-        "answer specifically and accurately, referencing real numbers and names where relevant. Remember "
-        "that savings are tracked per business and a business can never have more saved from it than its "
-        "actual profit. The snapshot's non_negotiable_principles are rules the user has personally "
-        "committed to never break — treat every one of them as a hard constraint on your advice, never "
-        "suggest anything that conflicts with one, and whenever a principle is relevant to the question, "
-        "name it and add a short one-sentence description of what it means, in your own words, so the "
-        "user is reminded why it matters. Be direct, encouraging, and concise (usually under 120 words "
-        "unless the question needs more). If asked to analyze the whole system, walk through the key "
-        "modules briefly. If data for something is missing, say so plainly instead of guessing. Keep "
-        "track of the conversation so far and stay consistent with anything you or the user said earlier "
-        "in this chat.\n\n"
+        _currency_instruction(user) + " You are the AI Advisor inside this user's Personal Operating System — "
+        "a Growth Tracker built around the loop Identity -> Principles -> Objectives -> Systems -> Daily "
+        "Actions -> Evidence -> Review -> Adaptation, for a September 2026 - September 2028 transformation. "
+        "You are fully aware of everything running in their system — their stated identity_statement (who "
+        "they are becoming), their objectives (measurable targets across financial/business/career/education/ "
+        "personal dimensions), every business, every transaction summary, every goal, total and per-business "
+        "savings balances and history, active hotspots, today's tasks, recent evidence entries (deep work, "
+        "learning, shipped work, outreach, financial activity), open decisions awaiting review, running "
+        "experiments, their identity_alignment_score with its six explainable dimensions (execution, growth, "
+        "financial, discipline, strategy, capacity) plus any identity_alignment_warning, recent journal "
+        "entries, unread notifications, their full mission timeline, and recent daily execution scores. Use "
+        "this JSON snapshot of their live data, pulled fresh from the database for this message, to answer "
+        "specifically and accurately, referencing real numbers and names where relevant. Remember that "
+        "savings are tracked per business and a business can never have more saved from it than its actual "
+        "profit. The snapshot's non_negotiable_principles are rules the user has personally committed to "
+        "never break — treat every one of them as a hard constraint on your advice, never suggest anything "
+        "that conflicts with one, and whenever a principle is relevant to the question, name it and add a "
+        "short one-sentence description of what it means, in your own words, so the user is reminded why it "
+        "matters.\n\n"
+        "BE A CONSTRUCTIVE CHALLENGER, NOT A CHEERLEADER. If the user's recent behavior (evidence, tasks, "
+        "transactions) does not appear aligned with their stated identity_statement or an objective they say "
+        "matters, say so plainly and specifically, citing the numbers — e.g. 'You said client acquisition is "
+        "a priority, but the last 14 days show 3 hours of outreach evidence against 18 hours of admin.' Do "
+        "not soften this into vague encouragement. Distinguish FACT (what the data shows), INFERENCE (a "
+        "reasonable read of that data), ASSUMPTION (something you cannot verify from the data), and "
+        "RECOMMENDATION (what to do about it) when giving substantive advice, so the user can tell which is "
+        "which. A high identity_alignment_score does not automatically mean things are going well — a high "
+        "execution score with low growth/financial/strategy evidence can mean the user is busy but not "
+        "progressing; call that out if you see it, especially if identity_alignment_warning is set.\n\n"
+        "NEVER FABRICATE DATA. If something needed to answer the question is missing from the snapshot, say "
+        "'Insufficient data to determine this' rather than guessing or inventing a number. Be direct and "
+        "concise (usually under 120 words unless the question needs more). If asked to analyze the whole "
+        "system, walk through the key modules briefly. Keep track of the conversation so far and stay "
+        "consistent with anything you or the user said earlier in this chat.\n\n"
         "CURRENT SYSTEM SNAPSHOT (JSON, live from the database):\n" + json.dumps(snapshot, default=str)
     )
 
@@ -3811,6 +4955,32 @@ def weekly_review(user: User = Depends(get_current_user), db: Session = Depends(
         JournalEntry.user_id == user.id, JournalEntry.date >= week_start, JournalEntry.date <= today).order_by(JournalEntry.date.asc()).all()
     lessons = [j.learned for j in journal_entries if j.learned]
 
+    # ---- Personal Operating System additions ----
+    ia_scores = []
+    d = week_start
+    while d <= today:
+        total, _, _, _, _ = _compute_identity_alignment(db, user, d)
+        ia_scores.append(total)
+        d += timedelta(days=1)
+    avg_identity_alignment = round(sum(ia_scores) / len(ia_scores), 1) if ia_scores else None
+
+    decisions_logged = db.query(Decision).filter(Decision.user_id == user.id, Decision.date >= week_start, Decision.date <= today).count()
+    decisions_reviewed = db.query(Decision).filter(
+        Decision.user_id == user.id, Decision.status == "reviewed",
+        Decision.review_date != None, Decision.review_date >= week_start, Decision.review_date <= today).count()  # noqa: E711
+    experiments_concluded = db.query(Experiment).filter(
+        Experiment.user_id == user.id, Experiment.status == "concluded",
+        Experiment.end_date != None, Experiment.end_date >= week_start, Experiment.end_date <= today).count()  # noqa: E711
+    evidence_count = db.query(Evidence).filter(Evidence.user_id == user.id, Evidence.date >= week_start, Evidence.date <= today).count()
+    test_rows = db.query(JournalEntry).filter(
+        JournalEntry.user_id == user.id, JournalEntry.date >= week_start, JournalEntry.date <= today,
+        JournalEntry.test_2028.isnot(None)).all()
+    test_2028_week = {
+        "yes": len([r for r in test_rows if r.test_2028 == "yes"]),
+        "uncertain": len([r for r in test_rows if r.test_2028 == "uncertain"]),
+        "no": len([r for r in test_rows if r.test_2028 == "no"]),
+    }
+
     return {
         "week_start": week_start.isoformat(), "week_end": today.isoformat(),
         "total_revenue": revenue, "total_expense": expense, "total_profit": revenue - expense,
@@ -3823,6 +4993,12 @@ def weekly_review(user: User = Depends(get_current_user), db: Session = Depends(
         "week_tasks_total": week_tasks_total,
         "week_tasks_done": week_tasks_done,
         "avg_execution_score": avg_score,
+        "avg_identity_alignment_score": avg_identity_alignment,
+        "decisions_logged": decisions_logged,
+        "decisions_reviewed": decisions_reviewed,
+        "experiments_concluded": experiments_concluded,
+        "evidence_logged": evidence_count,
+        "test_2028_this_week": test_2028_week,
         "lessons_learned": lessons,
     }
 
@@ -3860,6 +5036,18 @@ def monthly_review(user: User = Depends(get_current_user), db: Session = Depends
     month_tasks_total = db.query(Todo).filter(Todo.user_id == user.id, Todo.due_date >= month_start, Todo.due_date <= today).count()
     month_tasks_done = db.query(Todo).filter(Todo.user_id == user.id, Todo.due_date >= month_start, Todo.due_date <= today, Todo.status == "completed").count()
 
+    # ---- Personal Operating System additions ----
+    objectives = db.query(Objective).filter(Objective.user_id == user.id).all()
+    objective_summary = [
+        {"title": o.title, "dimension": o.dimension, "status": _objective_status(o, today)}
+        for o in objectives
+    ]
+    decisions_logged = db.query(Decision).filter(Decision.user_id == user.id, Decision.date >= month_start, Decision.date <= today).count()
+    experiments_concluded = db.query(Experiment).filter(
+        Experiment.user_id == user.id, Experiment.status == "concluded",
+        Experiment.end_date != None, Experiment.end_date >= month_start, Experiment.end_date <= today).count()  # noqa: E711
+    evidence_count = db.query(Evidence).filter(Evidence.user_id == user.id, Evidence.date >= month_start, Evidence.date <= today).count()
+
     return {
         "month": month_start.strftime("%Y-%m"),
         "revenue": revenue, "expense": expense, "profit": profit,
@@ -3872,6 +5060,10 @@ def monthly_review(user: User = Depends(get_current_user), db: Session = Depends
         "business_comparison": comparison,
         "month_tasks_total": month_tasks_total,
         "month_tasks_done": month_tasks_done,
+        "objectives": objective_summary,
+        "decisions_logged": decisions_logged,
+        "experiments_concluded": experiments_concluded,
+        "evidence_logged": evidence_count,
     }
 
 
