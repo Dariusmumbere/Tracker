@@ -287,9 +287,7 @@ class User(Base):
     principles = relationship("Principle", back_populates="owner", cascade="all, delete-orphan")
     journal_entries = relationship("JournalEntry", back_populates="owner", cascade="all, delete-orphan")
     milestones = relationship("Milestone", back_populates="owner", cascade="all, delete-orphan")
-    execution_scores = relationship("ExecutionScore", back_populates="owner", cascade="all, delete-orphan")
     todos = relationship("Todo", back_populates="owner", cascade="all, delete-orphan")
-    daily_scores = relationship("DailyScore", back_populates="owner", cascade="all, delete-orphan")
     daily_records = relationship("DailyRecord", back_populates="owner", cascade="all, delete-orphan")
     chat_messages = relationship("ChatMessage", back_populates="owner", cascade="all, delete-orphan")
     business_recommendations = relationship("BusinessRecommendation", back_populates="owner", cascade="all, delete-orphan")
@@ -342,6 +340,7 @@ class DailyRecord(Base):
     category = Column(String, default="Other")
     description = Column(String, default="")
     date = Column(Date, default=lambda: client_today(), index=True)
+    is_one_off = Column(Boolean, default=False)  # one-time amount (bonus, gift, emergency bill…) vs a regular/recurring one
     created_at = Column(DateTime, default=utcnow)
 
     owner = relationship("User", back_populates="daily_records")
@@ -621,19 +620,6 @@ class Milestone(Base):
     owner = relationship("User", back_populates="milestones")
 
 
-class ExecutionScore(Base):
-    """One row per user per day — snapshot of that day's execution score."""
-    __tablename__ = "execution_scores"
-    id = Column(Integer, primary_key=True, index=True)
-    user_id = Column(Integer, ForeignKey("users.id"), nullable=False, index=True)
-    date = Column(Date, default=lambda: client_today(), index=True)
-    score = Column(Float, default=0)
-    breakdown_json = Column(String, default="{}")
-    created_at = Column(DateTime, default=utcnow)
-
-    owner = relationship("User", back_populates="execution_scores")
-
-
 class Todo(Base):
     """A single task. Tasks are the atomic unit the daily score is graded on.
     If `recurring` is true, this task acts as a template: a fresh instance
@@ -660,26 +646,11 @@ class Todo(Base):
     owner = relationship("User", back_populates="todos")
 
 
-class DailyScore(Base):
-    """Persisted daily score record — one row per user per day, kept
-    permanently as a historical log (separate from the live-recomputed
-    ExecutionScore snapshot, this is the immutable end-of-day record)."""
-    __tablename__ = "daily_scores"
-    id = Column(Integer, primary_key=True, index=True)
-    user_id = Column(Integer, ForeignKey("users.id"), nullable=False, index=True)
-    date = Column(Date, default=lambda: client_today(), index=True)
-    score = Column(Float, default=0)
-    tasks_total = Column(Integer, default=0)
-    tasks_completed = Column(Integer, default=0)
-    breakdown_json = Column(String, default="{}")
-    created_at = Column(DateTime, default=utcnow)
-
-    owner = relationship("User", back_populates="daily_scores")
-
-
 class DailyTrackerScore(Base):
     """One row per user per day — the Smart Daily Tracker's own score,
-    separate from the business-focused ExecutionScore/DailyScore above.
+    which grades the personal daily spending routine specifically (not to
+    be confused with the Identity Alignment score, which is the single
+    canonical "how am I doing overall" score — see _compute_identity_alignment).
     Graded on: staying within the daily spending limit, completing tasks
     due that day, logging at least one Daily Tracker record, filling the
     journal, and putting funds toward a goal."""
@@ -797,6 +768,18 @@ try:
         conn.exec_driver_sql("ALTER TABLE todos ADD COLUMN IF NOT EXISTS objective_id INTEGER")
 except Exception as _mig_err:
     logger.warning("Todo table migration skipped/failed (non-fatal): %s", _mig_err)
+
+# ----------------------------------------------------------------------------
+# One-time (off) amounts on the Daily Tracker — lets an entry be flagged as a
+# non-recurring earning/expense (bonus, gift, emergency bill…) so the daily
+# flow can separate "normal" cash flow from one-off amounts while still
+# counting both toward totals and the available-for-use balance.
+# ----------------------------------------------------------------------------
+try:
+    with engine.begin() as conn:
+        conn.exec_driver_sql("ALTER TABLE daily_records ADD COLUMN IF NOT EXISTS is_one_off BOOLEAN DEFAULT FALSE")
+except Exception as _mig_err:
+    logger.warning("DailyRecord one-off migration skipped/failed (non-fatal): %s", _mig_err)
 
 
 def get_db():
@@ -985,6 +968,7 @@ class DailyRecordIn(BaseModel):
     category: str = "Other"
     description: str = ""
     date: Optional[datetime.date] = None
+    is_one_off: bool = False
 
     @field_validator("type")
     @classmethod
@@ -1007,6 +991,7 @@ class DailyRecordUpdateIn(BaseModel):
     category: Optional[str] = None
     description: Optional[str] = None
     date: Optional[datetime.date] = None
+    is_one_off: Optional[bool] = None
 
     @field_validator("type")
     @classmethod
@@ -1023,6 +1008,7 @@ class DailyRecordOut(BaseModel):
     category: str
     description: str
     date: date
+    is_one_off: bool = False
 
     class Config:
         from_attributes = True
@@ -1053,6 +1039,16 @@ class DailyDashboardOut(BaseModel):
     tracker_breakdown: dict = {}
     tracker_cautions: List[str] = []
     tracker_suggestions: List[str] = []
+    # One-time (off) amounts — earnings/expenses flagged as non-recurring
+    # (bonuses, gifts, emergency bills…), broken out from the regular flow.
+    one_off_earnings: float = 0.0
+    one_off_expenses: float = 0.0
+    recurring_earnings: float = 0.0
+    recurring_expenses: float = 0.0
+    # Unified earnings + savings + expenses picture, all on one page:
+    # what's actually free to spend right now.
+    savings_balance: float = 0.0
+    available_balance: float = 0.0
 
 
 class DailyReportOut(BaseModel):
@@ -1656,13 +1652,6 @@ class MilestoneOut(BaseModel):
         from_attributes = True
 
 
-class ExecutionScoreOut(BaseModel):
-    date: date
-    score: float
-    breakdown: dict
-    suggestions: List[str]
-
-
 # ----------------------------------------------------------------------------
 # Pydantic schemas — Todos / Daily Score / Chat / Business Recommendations
 # ----------------------------------------------------------------------------
@@ -1740,14 +1729,6 @@ class TodoOut(BaseModel):
 
     class Config:
         from_attributes = True
-
-
-class DailyScoreOut(BaseModel):
-    date: date
-    score: float
-    tasks_total: int
-    tasks_completed: int
-    breakdown: dict
 
 
 class ChatIn(BaseModel):
@@ -2022,9 +2003,9 @@ def _daily_period_bounds(period: str, today: date):
 
 # ----------------------------------------------------------------------------
 # Smart Daily Tracker — spending-limit control + the tracker's own score.
-# Kept deliberately separate from the business ExecutionScore: this one
+# Kept deliberately separate from the Identity Alignment score: this one
 # grades the *personal* daily routine (Daily Tracker records, tasks,
-# journal, goal funding), not business bookkeeping.
+# journal, goal funding), not the overall "how am I doing" picture.
 # ----------------------------------------------------------------------------
 
 def _daily_limit_status(db: Session, user: User, on_date: date) -> dict:
@@ -2127,6 +2108,7 @@ def list_daily_records(
     type: Optional[str] = None,
     start_date: Optional[date] = None,
     end_date: Optional[date] = None,
+    is_one_off: Optional[bool] = None,
     limit: int = Query(2000, le=5000),
     user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
@@ -2138,6 +2120,8 @@ def list_daily_records(
         q = q.filter(DailyRecord.date >= start_date)
     if end_date:
         q = q.filter(DailyRecord.date <= end_date)
+    if is_one_off is not None:
+        q = q.filter(DailyRecord.is_one_off == is_one_off)
     return q.order_by(DailyRecord.date.desc(), DailyRecord.id.desc()).limit(limit).all()
 
 
@@ -2146,7 +2130,7 @@ def create_daily_record(body: DailyRecordIn, user: User = Depends(get_current_us
     rec = DailyRecord(
         user_id=user.id, type=body.type, amount=body.amount,
         category=body.category or "Other", description=body.description or "",
-        date=body.date or client_today(),
+        date=body.date or client_today(), is_one_off=bool(body.is_one_off),
     )
     db.add(rec)
     db.commit()
@@ -2159,7 +2143,7 @@ def update_daily_record(rec_id: int, body: DailyRecordUpdateIn, user: User = Dep
     rec = db.query(DailyRecord).filter(DailyRecord.id == rec_id, DailyRecord.user_id == user.id).first()
     if not rec:
         raise HTTPException(status_code=404, detail="Daily record not found.")
-    for field in ("type", "amount", "category", "description", "date"):
+    for field in ("type", "amount", "category", "description", "date", "is_one_off"):
         val = getattr(body, field)
         if val is not None:
             setattr(rec, field, val)
@@ -2202,6 +2186,21 @@ def daily_records_dashboard(user: User = Depends(get_current_user), db: Session 
     score, breakdown, cautions, suggestions = _compute_daily_tracker_score(db, user, today)
     _persist_daily_tracker_score(db, user, today, score, breakdown)
 
+    # One-time (off) amounts — flagged entries counted separately from the
+    # regular/recurring flow, but still included in every total above.
+    one_off_earnings = float(db.query(func.coalesce(func.sum(DailyRecord.amount), 0.0)).filter(
+        DailyRecord.user_id == user.id, DailyRecord.type == "earning", DailyRecord.is_one_off == True).scalar() or 0.0)  # noqa: E712
+    one_off_expenses = float(db.query(func.coalesce(func.sum(DailyRecord.amount), 0.0)).filter(
+        DailyRecord.user_id == user.id, DailyRecord.type == "expense", DailyRecord.is_one_off == True).scalar() or 0.0)  # noqa: E712
+
+    # Unified earnings + savings + expenses picture, all on one page: what's
+    # actually available to use right now is everything earned, minus
+    # everything spent, minus whatever has already been deliberately set
+    # aside in Savings.
+    savings_balance = float(db.query(func.coalesce(func.sum(Savings.amount_saved), 0.0)).filter(
+        Savings.user_id == user.id).scalar() or 0.0)
+    available_balance = all_earnings - all_expenses - savings_balance
+
     return DailyDashboardOut(
         today_earnings=today_earnings, today_expenses=today_expenses, today_net=today_earnings - today_expenses,
         week_earnings=week_earnings, week_expenses=week_expenses, week_net=week_earnings - week_expenses,
@@ -2212,6 +2211,9 @@ def daily_records_dashboard(user: User = Depends(get_current_user), db: Session 
         daily_limit_remaining=limit_info["remaining"], daily_limit_percent_used=limit_info["percent_used"],
         daily_limit_message=limit_info["message"],
         tracker_score=score, tracker_breakdown=breakdown, tracker_cautions=cautions, tracker_suggestions=suggestions,
+        one_off_earnings=one_off_earnings, one_off_expenses=one_off_expenses,
+        recurring_earnings=all_earnings - one_off_earnings, recurring_expenses=all_expenses - one_off_expenses,
+        savings_balance=savings_balance, available_balance=available_balance,
     )
 
 
@@ -3132,13 +3134,14 @@ def _decision_out(d: Decision) -> DecisionOut:
         options = json.loads(d.options_json or "[]")
     except Exception:
         options = []
+    s = lambda v: v if v is not None else ""  # noqa: E731 — guard against legacy/NULL text columns
     return DecisionOut(
-        id=d.id, title=d.title, date=d.date, context=d.context, problem=d.problem, options=options,
-        chosen_strategy=d.chosen_strategy, assumptions=d.assumptions, confidence=d.confidence,
-        expected_outcome=d.expected_outcome, evidence_supporting=d.evidence_supporting, downside=d.downside,
-        plan_b=d.plan_b, review_date=d.review_date, actual_outcome=d.actual_outcome,
-        correct_assumptions=d.correct_assumptions, wrong_assumptions=d.wrong_assumptions,
-        lessons_learned=d.lessons_learned, status=d.status, created_at=d.created_at,
+        id=d.id, title=s(d.title), date=d.date, context=s(d.context), problem=s(d.problem), options=options,
+        chosen_strategy=s(d.chosen_strategy), assumptions=s(d.assumptions), confidence=s(d.confidence) or "medium",
+        expected_outcome=s(d.expected_outcome), evidence_supporting=s(d.evidence_supporting), downside=s(d.downside),
+        plan_b=s(d.plan_b), review_date=d.review_date, actual_outcome=s(d.actual_outcome),
+        correct_assumptions=s(d.correct_assumptions), wrong_assumptions=s(d.wrong_assumptions),
+        lessons_learned=s(d.lessons_learned), status=s(d.status) or "open", created_at=d.created_at,
     )
 
 
@@ -3153,21 +3156,33 @@ def list_decisions(status: Optional[str] = None, user: User = Depends(get_curren
 
 @app.post("/decisions", response_model=DecisionOut)
 def create_decision(body: DecisionIn, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
-    title = body.title.strip()
+    title = (body.title or "").strip()
     if not title:
         raise HTTPException(status_code=400, detail="Decision title is required.")
-    d = Decision(
-        user_id=user.id, title=title, date=body.date or client_today(), context=body.context.strip(),
-        problem=body.problem.strip(), options_json=json.dumps([o.model_dump() for o in body.options]),
-        chosen_strategy=body.chosen_strategy.strip(), assumptions=body.assumptions.strip(),
-        confidence=body.confidence, expected_outcome=body.expected_outcome.strip(),
-        evidence_supporting=body.evidence_supporting.strip(), downside=body.downside.strip(),
-        plan_b=body.plan_b.strip(), review_date=body.review_date,
-    )
-    db.add(d)
-    db.commit()
-    db.refresh(d)
-    return _decision_out(d)
+    try:
+        d = Decision(
+            user_id=user.id, title=title, date=body.date or client_today(),
+            context=(body.context or "").strip(), problem=(body.problem or "").strip(),
+            options_json=json.dumps([o.model_dump() for o in (body.options or [])]),
+            chosen_strategy=(body.chosen_strategy or "").strip(), assumptions=(body.assumptions or "").strip(),
+            confidence=body.confidence or "medium", expected_outcome=(body.expected_outcome or "").strip(),
+            evidence_supporting=(body.evidence_supporting or "").strip(), downside=(body.downside or "").strip(),
+            plan_b=(body.plan_b or "").strip(), review_date=body.review_date,
+            # Set explicitly rather than relying on column defaults, so the
+            # object is fully populated (and safely serializable) even
+            # before the next commit/refresh round-trip.
+            actual_outcome="", correct_assumptions="", wrong_assumptions="", lessons_learned="", status="open",
+        )
+        db.add(d)
+        db.commit()
+        db.refresh(d)
+        return _decision_out(d)
+    except HTTPException:
+        raise
+    except Exception:
+        db.rollback()
+        logger.exception("Failed to create decision for user_id=%s", user.id)
+        raise HTTPException(status_code=500, detail="Could not save the decision. Please try again.")
 
 
 @app.put("/decisions/{decision_id}", response_model=DecisionOut)
@@ -3199,8 +3214,13 @@ def update_decision(decision_id: int, body: DecisionUpdateIn, user: User = Depen
         d.plan_b = body.plan_b.strip()
     if body.review_date is not None:
         d.review_date = body.review_date
-    db.commit()
-    db.refresh(d)
+    try:
+        db.commit()
+        db.refresh(d)
+    except Exception:
+        db.rollback()
+        logger.exception("Failed to update decision_id=%s for user_id=%s", decision_id, user.id)
+        raise HTTPException(status_code=500, detail="Could not save changes to this decision. Please try again.")
     return _decision_out(d)
 
 
@@ -3209,13 +3229,18 @@ def record_decision_outcome(decision_id: int, body: DecisionOutcomeIn, user: Use
     d = db.query(Decision).filter(Decision.id == decision_id, Decision.user_id == user.id).first()
     if not d:
         raise HTTPException(status_code=404, detail=f"Decision {decision_id} not found for this account.")
-    d.actual_outcome = body.actual_outcome.strip()
-    d.correct_assumptions = body.correct_assumptions.strip()
-    d.wrong_assumptions = body.wrong_assumptions.strip()
-    d.lessons_learned = body.lessons_learned.strip()
+    d.actual_outcome = (body.actual_outcome or "").strip()
+    d.correct_assumptions = (body.correct_assumptions or "").strip()
+    d.wrong_assumptions = (body.wrong_assumptions or "").strip()
+    d.lessons_learned = (body.lessons_learned or "").strip()
     d.status = "reviewed"
-    db.commit()
-    db.refresh(d)
+    try:
+        db.commit()
+        db.refresh(d)
+    except Exception:
+        db.rollback()
+        logger.exception("Failed to record outcome for decision_id=%s user_id=%s", decision_id, user.id)
+        raise HTTPException(status_code=500, detail="Could not save the outcome. Please try again.")
     return _decision_out(d)
 
 
@@ -3715,133 +3740,25 @@ def ai_todo_feedback(user: User = Depends(get_current_user), db: Session = Depen
 
 
 # ----------------------------------------------------------------------------
-# Daily Execution Score
+# Scoring — Identity Alignment is the single, canonical score for "how is
+# today/this period going" (see _compute_identity_alignment above, and
+# /scores/identity-alignment / /scores/identity-alignment/history below).
+# The old standalone "Execution Score" has been retired in favor of it,
+# since execution is already one of Identity Alignment's six dimensions —
+# keeping both around measured overlapping things with different numbers,
+# which was confusing rather than useful.
 # ----------------------------------------------------------------------------
 
-def _compute_execution_score(db: Session, user: User, on_date: date):
-    breakdown = {}
-    today = on_date
-    week_start = today - timedelta(days=today.weekday())
-
-    rev_today = _tx_sum(db, user, "revenue", today, today)
-    exp_today = _tx_sum(db, user, "expense", today, today)
-    breakdown["revenue_recorded"] = rev_today > 0
-    breakdown["expenses_recorded"] = exp_today > 0
-
-    savings_this_week = db.query(Savings).filter(Savings.user_id == user.id, Savings.date >= week_start, Savings.date <= today).count()
-    breakdown["savings_updated"] = savings_this_week > 0
-
-    journal_today = db.query(JournalEntry).filter(JournalEntry.user_id == user.id, JournalEntry.date == today).first()
-    breakdown["journal_completed"] = bool(journal_today)
-
-    active_businesses = db.query(Business).filter(Business.user_id == user.id, Business.status == "active").all()
-    three_days_ago = today - timedelta(days=3)
-    engaged = 0
-    for b in active_businesses:
-        has_tx = db.query(Transaction).filter(
-            Transaction.business_id == b.id, Transaction.user_id == user.id,
-            Transaction.date >= three_days_ago, Transaction.date <= today,
-        ).first()
-        if has_tx:
-            engaged += 1
-    breakdown["businesses_updated"] = f"{engaged}/{len(active_businesses)}" if active_businesses else "0/0"
-    business_engagement_ratio = (engaged / len(active_businesses)) if active_businesses else 1.0
-
-    if on_date == client_today():
-        _refresh_recurring_todos(db, user)
-    tasks_due_today = db.query(Todo).filter(Todo.user_id == user.id, Todo.due_date == today).all()
-    tasks_total = len(tasks_due_today)
-    tasks_completed = len([t for t in tasks_due_today if t.status == "completed"])
-    task_ratio = (tasks_completed / tasks_total) if tasks_total else 1.0
-    breakdown["tasks_completed"] = f"{tasks_completed}/{tasks_total}" if tasks_total else "0/0"
-
-    weights = {
-        "revenue_recorded": 15,
-        "expenses_recorded": 10,
-        "savings_updated": 10,
-        "journal_completed": 15,
-        "business_engagement": 20,
-        "tasks_completed": 30,
-    }
-    score = 0.0
-    score += weights["revenue_recorded"] if breakdown["revenue_recorded"] else 0
-    score += weights["expenses_recorded"] if breakdown["expenses_recorded"] else 0
-    score += weights["savings_updated"] if breakdown["savings_updated"] else 0
-    score += weights["journal_completed"] if breakdown["journal_completed"] else 0
-    score += weights["business_engagement"] * business_engagement_ratio
-    score += weights["tasks_completed"] * task_ratio
-    score = round(min(100.0, score), 1)
-
-    suggestions = []
-    if tasks_total and tasks_completed < tasks_total:
-        suggestions.append(f"You've completed {tasks_completed} of {tasks_total} tasks due today — finish the rest before the day ends.")
-    if not tasks_total:
-        suggestions.append("You have no tasks scheduled for today — add a few in the Todo list so progress is trackable.")
-    if not breakdown["revenue_recorded"]:
-        suggestions.append("Log today's revenue, even if it's small — consistency matters more than size.")
-    if not breakdown["expenses_recorded"]:
-        suggestions.append("Record any expenses from today so tomorrow's profit numbers stay accurate.")
-    if not breakdown["savings_updated"]:
-        suggestions.append("Set aside a percentage of this week's profit into savings from whichever business earned it.")
-    if not breakdown["journal_completed"]:
-        suggestions.append("Write a quick journal entry — what you did, learned, and will improve.")
-    if business_engagement_ratio < 1.0:
-        suggestions.append("Touch base with every active business at least every few days, even briefly.")
-    if not suggestions:
-        suggestions.append("Great work today — keep the same routine tomorrow.")
-
-    return score, breakdown, suggestions, tasks_total, tasks_completed
-
-
-@app.get("/execution-score/today", response_model=ExecutionScoreOut)
-def execution_score_today(user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+@app.get("/scores/identity-alignment/history")
+def identity_alignment_history(days: int = Query(30, le=90), user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     today = client_today()
-    score, breakdown, suggestions, tasks_total, tasks_completed = _compute_execution_score(db, user, today)
-
-    existing = db.query(ExecutionScore).filter(ExecutionScore.user_id == user.id, ExecutionScore.date == today).first()
-    if existing:
-        existing.score = score
-        existing.breakdown_json = json.dumps(breakdown)
-    else:
-        db.add(ExecutionScore(user_id=user.id, date=today, score=score, breakdown_json=json.dumps(breakdown)))
-
-    existing_daily = db.query(DailyScore).filter(DailyScore.user_id == user.id, DailyScore.date == today).first()
-    if existing_daily:
-        existing_daily.score = score
-        existing_daily.tasks_total = tasks_total
-        existing_daily.tasks_completed = tasks_completed
-        existing_daily.breakdown_json = json.dumps(breakdown)
-    else:
-        db.add(DailyScore(
-            user_id=user.id, date=today, score=score, tasks_total=tasks_total,
-            tasks_completed=tasks_completed, breakdown_json=json.dumps(breakdown),
-        ))
-    db.commit()
-
-    return ExecutionScoreOut(date=today, score=score, breakdown=breakdown, suggestions=suggestions)
-
-
-@app.get("/execution-score/history")
-def execution_score_history(days: int = 30, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
-    start = client_today() - timedelta(days=days - 1)
-    rows = db.query(ExecutionScore).filter(ExecutionScore.user_id == user.id, ExecutionScore.date >= start).order_by(ExecutionScore.date.asc()).all()
-    return [{"date": r.date.isoformat(), "score": r.score} for r in rows]
-
-
-@app.get("/daily-scores", response_model=List[DailyScoreOut])
-def list_daily_scores(days: int = Query(60, le=1000), user: User = Depends(get_current_user), db: Session = Depends(get_db)):
-    start = client_today() - timedelta(days=days - 1)
-    rows = db.query(DailyScore).filter(DailyScore.user_id == user.id, DailyScore.date >= start).order_by(DailyScore.date.desc()).all()
+    start = today - timedelta(days=days - 1)
     out = []
-    for r in rows:
-        try:
-            breakdown = json.loads(r.breakdown_json or "{}")
-        except Exception:
-            breakdown = {}
-        out.append(DailyScoreOut(
-            date=r.date, score=r.score, tasks_total=r.tasks_total,
-            tasks_completed=r.tasks_completed, breakdown=breakdown,
-        ))
+    d = start
+    while d <= today:
+        total, *_ = _compute_identity_alignment(db, user, d)
+        out.append({"date": d.isoformat(), "score": total})
+        d += timedelta(days=1)
     return out
 
 
@@ -4367,7 +4284,6 @@ def _build_full_system_snapshot(db: Session, user: User, light: bool = False) ->
     todos_today = db.query(Todo).filter(Todo.user_id == user.id, Todo.due_date == today).all()
     todo_snapshot = [{"title": t.title, "priority": t.priority, "status": t.status, "recurring": bool(t.recurring)} for t in todos_today]
 
-    score, breakdown, _, tasks_total, tasks_completed = _compute_execution_score(db, user, today)
     ia_total, ia_dims, ia_details, ia_weights, ia_warning = _compute_identity_alignment(db, user, today)
 
     objectives = db.query(Objective).filter(Objective.user_id == user.id).all()
@@ -4413,8 +4329,6 @@ def _build_full_system_snapshot(db: Session, user: User, light: bool = False) ->
         "net_worth": savings_balance + total_investments + total_assets,
         "active_hotspots": hotspot_snapshot,
         "todays_tasks": todo_snapshot,
-        "todays_execution_score": score,
-        "execution_breakdown": breakdown,
         "identity_alignment_score": ia_total,
         "identity_alignment_dimensions": ia_dims,
         "identity_alignment_warning": ia_warning,
@@ -4443,8 +4357,12 @@ def _build_full_system_snapshot(db: Session, user: User, light: bool = False) ->
             {"title": t.title, "priority": t.priority, "due_date": t.due_date.isoformat(), "status": t.status, "recurring": bool(t.recurring)}
             for t in all_open_todos
         ]
-        daily_scores = db.query(DailyScore).filter(DailyScore.user_id == user.id).order_by(DailyScore.date.desc()).limit(14).all()
-        snapshot["recent_daily_scores"] = [{"date": d.date.isoformat(), "score": d.score} for d in daily_scores]
+        recent_ia_scores = []
+        for i in range(13, -1, -1):
+            d_ = today - timedelta(days=i)
+            t_, *_ = _compute_identity_alignment(db, user, d_)
+            recent_ia_scores.append({"date": d_.isoformat(), "score": t_})
+        snapshot["recent_identity_alignment_scores"] = recent_ia_scores
         biz_map = {b.id: b.name for b in businesses}
         savings_rows = db.query(Savings).filter(Savings.user_id == user.id).order_by(Savings.date.desc()).limit(15).all()
         snapshot["recent_savings_records"] = [
@@ -4755,7 +4673,7 @@ def _rule_based_chat_reply(snapshot: dict, message: str, currency: str) -> str:
         top = ", ".join(t["title"] for t in tasks[:3])
         return f"You have {len(tasks)} open task(s), including: {top}. Want help prioritizing them?"
     if "score" in lower:
-        return f"Today's execution score is {snapshot.get('todays_execution_score', 0)}%. Complete your open tasks and log today's numbers to raise it."
+        return f"Today's identity alignment score is {snapshot.get('identity_alignment_score', 0)}%. Complete your open tasks and log today's numbers to raise it."
     if "principle" in lower or "non-negotiable" in lower or "non negotiable" in lower:
         principles = snapshot.get("non_negotiable_principles", [])
         if not principles:
@@ -4788,8 +4706,8 @@ def _rule_based_chat_reply(snapshot: dict, message: str, currency: str) -> str:
     return (
         f"I'm tracking your full system — {len(snapshot.get('businesses', []))} business(es), "
         f"{len(snapshot.get('goals', []))} goal(s), {len(snapshot.get('non_negotiable_principles', []))} "
-        f"non-negotiable principle(s), and today's execution score of "
-        f"{snapshot.get('todays_execution_score', 0)}%. Ask me about your tasks, goals, businesses, "
+        f"non-negotiable principle(s), and today's identity alignment score of "
+        f"{snapshot.get('identity_alignment_score', 0)}%. Ask me about your tasks, goals, businesses, "
         "savings, principles, mission timeline, or what to focus on today."
     )
 
@@ -4944,10 +4862,6 @@ def weekly_review(user: User = Depends(get_current_user), db: Session = Depends(
         Transaction.user_id == user.id, Transaction.date >= week_start, Transaction.date <= today).distinct().count()
     tasks_completed = tx_days
 
-    scores = db.query(ExecutionScore).filter(
-        ExecutionScore.user_id == user.id, ExecutionScore.date >= week_start, ExecutionScore.date <= today).all()
-    avg_score = round(sum(s.score for s in scores) / len(scores), 1) if scores else None
-
     week_tasks_total = db.query(Todo).filter(Todo.user_id == user.id, Todo.due_date >= week_start, Todo.due_date <= today).count()
     week_tasks_done = db.query(Todo).filter(Todo.user_id == user.id, Todo.due_date >= week_start, Todo.due_date <= today, Todo.status == "completed").count()
 
@@ -4992,7 +4906,6 @@ def weekly_review(user: User = Depends(get_current_user), db: Session = Depends(
         "tasks_completed_days": tasks_completed,
         "week_tasks_total": week_tasks_total,
         "week_tasks_done": week_tasks_done,
-        "avg_execution_score": avg_score,
         "avg_identity_alignment_score": avg_identity_alignment,
         "decisions_logged": decisions_logged,
         "decisions_reviewed": decisions_reviewed,
